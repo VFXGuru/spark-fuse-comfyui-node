@@ -1,0 +1,3 @@
+# The Spark Fuse API client (the "messenger"). Installs its own deps
+# (httpx, httpx-sse, python-dotenv, ...) transitively.
+spark-fuse @ git+https://github.com/VFXGuru/spark-fuse-messenger.git
