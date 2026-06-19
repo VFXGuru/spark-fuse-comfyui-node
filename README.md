@@ -43,11 +43,23 @@ runs onto a node that already cached the image, so warm runs skip the image pull
    git clone https://github.com/VFXGuru/spark-fuse-comfyui-node
    ```
    so it sits at `ComfyUI/custom_nodes/spark-fuse-comfyui-node`.
-2. Install the dependency into ComfyUI's Python (this pulls the messenger client
-   from GitHub):
+2. Install the dependency (the messenger client) into **the same Python that runs
+   your ComfyUI**.
+
+   Standard install (a venv or system Python):
    ```
    pip install -r requirements.txt
    ```
+
+   Portable or desktop ComfyUI (embedded Python): the portable build ships its own
+   Python in a `python_embeded` folder, and its isolated build step cannot fetch
+   the messenger's build backend, failing with `Cannot import 'hatchling.build'`.
+   Install the backend first and skip isolation. From the `python_embeded` folder:
+   ```
+   .\python.exe -m pip install hatchling
+   .\python.exe -m pip install --no-build-isolation -r "..\ComfyUI\custom_nodes\spark-fuse-comfyui-node\requirements.txt"
+   ```
+   Confirm with `.\python.exe -c "import spark_fuse; print('spark_fuse OK')"`.
 3. Restart ComfyUI.
 
 ## Configure
