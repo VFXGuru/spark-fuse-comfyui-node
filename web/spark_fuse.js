@@ -46,7 +46,7 @@ function buildPanel() {
   const passInput = el("input", { id: "sf-pass", type: "password", placeholder: "(unchanged)", style: inputStyle() });
 
   const saveBtn = el("button", { textContent: "Save settings", style: btnStyle("#3a3a3a"), onclick: async () => { await saveSettings(); await loadSkus(); } });
-  const renderBtn = el("button", { id: "sf-render", textContent: "Render on Spark Fuse", style: btnStyle("#7c5cff"), onclick: onRender });
+  const renderBtn = el("button", { id: "sf-render", textContent: "Render on Spark Fuse", style: btnStyle("#7c5cff") + "opacity:0.5;cursor:not-allowed;", disabled: true, onclick: onRender });
 
   const status = el("div", { id: "sf-status", style: "font-size:12px;margin:8px 0;min-height:16px;" });
   const log = el("pre", { id: "sf-log", style: `background:#111;border:1px solid #333;border-radius:4px;padding:6px;
@@ -75,6 +75,14 @@ function setStatus(text, color = "#ddd") {
   if (s) { s.textContent = text; s.style.color = color; }
 }
 
+function setRenderEnabled(on) {
+  const b = document.getElementById("sf-render");
+  if (!b) return;
+  b.disabled = !on;
+  b.style.opacity = on ? "1" : "0.5";
+  b.style.cursor = on ? "pointer" : "not-allowed";
+}
+
 async function loadSettings() {
   try {
     const s = await api("/settings");
@@ -90,7 +98,7 @@ async function loadSkus() {
   const select = document.getElementById("sf-sku");
   try {
     const data = await api("/skus");
-    if (data.error) { setStatus(`Could not list GPUs: ${data.error}`, "#ff8888"); return; }
+    if (data.error) { setStatus(`Could not list GPUs: ${data.error}`, "#ff8888"); setRenderEnabled(false); return; }
     const saved = (await api("/settings")).instance_type;
     select.innerHTML = "";
     for (const sku of data.skus) {
@@ -101,7 +109,8 @@ async function loadSkus() {
     }
     if (saved) select.value = saved;
     updateRate();
-  } catch (e) { setStatus(`Could not list GPUs: ${e}`, "#ff8888"); }
+    setRenderEnabled(!!select.value);
+  } catch (e) { setStatus(`Could not list GPUs: ${e}`, "#ff8888"); setRenderEnabled(false); }
 }
 
 async function updateRate() {
@@ -133,7 +142,9 @@ async function onRender() {
   const preview = document.getElementById("sf-preview");
   preview.style.display = "none";
   log.textContent = "";
-  renderBtn.disabled = true;
+  const sku = document.getElementById("sf-sku").value;
+  if (!sku) { setStatus("Pick a GPU first; the list may still be loading.", "#ff8888"); return; }
+  setRenderEnabled(false);
   setStatus("Exporting workflow and submitting...", "#ffd479");
 
   try {
@@ -142,14 +153,14 @@ async function onRender() {
     const res = await api("/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workflow: prompt.output, instance_type: document.getElementById("sf-sku").value }),
+      body: JSON.stringify({ workflow: prompt.output, instance_type: sku }),
     });
-    if (res.error) { setStatus(`Submit failed: ${res.error}`, "#ff8888"); renderBtn.disabled = false; return; }
+    if (res.error) { setStatus(`Submit failed: ${res.error}`, "#ff8888"); setRenderEnabled(true); return; }
     setStatus(`Submitted job ${res.jobId}. Watching...`, "#ffd479");
     pollJob(res.jobId);
   } catch (e) {
     setStatus(`Error: ${e}`, "#ff8888");
-    renderBtn.disabled = false;
+    setRenderEnabled(true);
   }
 }
 
@@ -172,7 +183,7 @@ function pollJob(jobId) {
     if (st.status === "succeeded" || st.status === "failed" || st.status === "cancelled") {
       clearInterval(pollTimer);
       pollTimer = null;
-      renderBtn.disabled = false;
+      setRenderEnabled(true);
       if (st.status === "failed" && st.error) setStatus(`Failed: ${st.error}`, "#ff8888");
     }
   }, 2500);
