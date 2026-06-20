@@ -50,7 +50,7 @@ function buildPanel() {
 
   const status = el("div", { id: "sf-status", style: "font-size:12px;margin:8px 0;min-height:16px;" });
   const log = el("pre", { id: "sf-log", style: `background:#111;border:1px solid #333;border-radius:4px;padding:6px;
-            height:140px;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0 0 8px;` });
+            height:280px;min-height:120px;resize:vertical;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0 0 8px;` });
   const preview = el("img", { id: "sf-preview", style: "max-width:100%;border:1px solid #333;border-radius:4px;display:none;" });
 
   panel.append(
