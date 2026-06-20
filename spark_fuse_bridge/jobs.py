@@ -46,12 +46,36 @@ def get_job_state(job_id: str) -> dict | None:
         return snapshot
 
 
+_MODEL_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft", ".onnx")
+
+
+def _normalize_model_paths(prompt: dict) -> None:
+    """Convert Windows backslashes to forward slashes in model-path inputs.
+
+    ComfyUI on Windows records sub-foldered model names with backslashes (e.g.
+    'FLUX2\\model.safetensors'); the cloud runs Linux, where a backslash is a
+    literal character, not a path separator. Rewrite those in place so a
+    Windows-authored workflow resolves against the Linux /assets mount. The
+    assets library must still mirror your local model folder layout.
+    """
+    if not isinstance(prompt, dict):
+        return
+    for node in prompt.values():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for key, value in inputs.items():
+            if isinstance(value, str) and "\\" in value and value.lower().endswith(_MODEL_EXTS):
+                inputs[key] = value.replace("\\", "/")
+
+
 def submit_workflow(api_prompt: dict, instance_type: str | None = None) -> str:
     """Submit an API-format workflow to Spark Fuse and return the job id.
 
     Models come from the read-only /assets mount; the small workflow.json is pushed
     via the auto-prepare upload URL. Progress is then tracked in a background thread.
     """
+    _normalize_model_paths(api_prompt)
     settings = load_settings()
     client = make_client(settings)
     client.login()
