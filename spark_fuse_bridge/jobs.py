@@ -147,31 +147,41 @@ def _watch(client, job_id: str) -> None:
                 _update(job_id, status=event.status)
 
         job = client.get_job(job_id)
-        _update(
-            job_id,
-            status=job.status,
+        common = dict(
             exit_code=job.exit_code,
             image_cache_hit=job.image_cache_hit,
             image_affinity=job.image_affinity,
         )
 
-        if job.status == "succeeded" and job.output and job.output.share_sync_base_url:
-            import folder_paths  # ComfyUI-provided; available at runtime
-            out_dir = Path(folder_paths.get_output_directory())
-            paths = client.download_outputs(job.output.share_sync_base_url, out_dir)
-            images = [
-                p for p in paths
-                if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
-            ]
-            if images:
-                _update(job_id, image=Path(images[0]).name)
-                _append_line(job_id, f"[bridge] downloaded {len(images)} image(s) to ComfyUI output")
-            else:
-                _append_line(job_id, "[bridge] job succeeded but no image file was found")
-        elif job.status != "succeeded":
+        if job.status == "succeeded":
+            # Download the image BEFORE publishing the terminal status, so the UI
+            # never sees 'succeeded' without an image and stop polling too early.
+            image_name = None
+            try:
+                if job.output and job.output.share_sync_base_url:
+                    import folder_paths  # ComfyUI-provided; available at runtime
+                    out_dir = Path(folder_paths.get_output_directory())
+                    paths = client.download_outputs(job.output.share_sync_base_url, out_dir)
+                    images = [
+                        p for p in paths
+                        if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                    ]
+                    if images:
+                        image_name = Path(images[0]).name
+                        _append_line(job_id, f"[bridge] downloaded {len(images)} image(s) to ComfyUI output")
+                    else:
+                        _append_line(job_id, "[bridge] job succeeded but no image file was found")
+                else:
+                    _append_line(job_id, "[bridge] job succeeded but no output path was returned")
+            except Exception as exc:  # noqa: BLE001 - a download failure must not mark a good job failed
+                _append_line(job_id, f"[bridge] download failed: {exc}")
+            _update(job_id, status=job.status, image=image_name, **common)
+        else:
             state = get_job_state(job_id)
             detail = _extract_validation_error(state["lines"]) if state else None
-            _update(job_id, error=detail or job.error_message or job.error_code or "job failed")
+            _update(job_id, status=job.status,
+                    error=detail or job.error_message or job.error_code or "job failed",
+                    **common)
     except Exception as exc:  # noqa: BLE001 - any failure should surface in the UI
         _append_line(job_id, f"[bridge error] {exc}")
         _update(job_id, status="failed", error=str(exc))
