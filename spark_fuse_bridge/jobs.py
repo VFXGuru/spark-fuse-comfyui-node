@@ -108,6 +108,35 @@ def submit_workflow(api_prompt: dict, instance_type: str | None = None) -> str:
     return job_id
 
 
+def _extract_validation_error(lines: list[str]) -> str | None:
+    """Pull a human-readable reason out of a ComfyUI prompt-validation rejection.
+
+    The runner prints the raw /prompt 400 body, which carries node_errors with the
+    offending input and value (for example a model name not present on /assets).
+    """
+    for line in lines:
+        s = line.strip()
+        if '"node_errors"' not in s:
+            continue
+        try:
+            data = json.loads(s)
+        except ValueError:
+            continue
+        msgs = []
+        for node_id, info in (data.get("node_errors") or {}).items():
+            ctype = info.get("class_type", "node")
+            for err in info.get("errors", []):
+                detail = err.get("details") or err.get("message") or "invalid"
+                if err.get("type") == "value_not_in_list":
+                    detail += (" — not found on the cloud. Make sure this model exists "
+                               "under /assets at that path; your ShareSync assets must "
+                               "mirror your local model folders.")
+                msgs.append(f"{ctype} {node_id}: {detail}")
+        if msgs:
+            return " | ".join(msgs)
+    return None
+
+
 def _watch(client, job_id: str) -> None:
     try:
         # Stream the log until the server closes it (job reaches a terminal state).
@@ -140,7 +169,9 @@ def _watch(client, job_id: str) -> None:
             else:
                 _append_line(job_id, "[bridge] job succeeded but no image file was found")
         elif job.status != "succeeded":
-            _update(job_id, error=job.error_message or job.error_code or "job failed")
+            state = get_job_state(job_id)
+            detail = _extract_validation_error(state["lines"]) if state else None
+            _update(job_id, error=detail or job.error_message or job.error_code or "job failed")
     except Exception as exc:  # noqa: BLE001 - any failure should surface in the UI
         _append_line(job_id, f"[bridge error] {exc}")
         _update(job_id, status="failed", error=str(exc))
