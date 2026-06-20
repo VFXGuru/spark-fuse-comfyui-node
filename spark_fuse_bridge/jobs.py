@@ -138,16 +138,34 @@ def _extract_validation_error(lines: list[str]) -> str | None:
     return None
 
 
-def _watch(client, job_id: str) -> None:
+def _stream_into_panel(client, job_id: str) -> None:
+    """Best-effort live log feed for the panel. Completion is detected by polling
+    the job status, not by this returning: the SSE stream can stay open well past
+    the job's terminal state (the compute's idle-hold keeps it alive), so the
+    download must not be blocked on it closing."""
     try:
-        # Stream the log until the server closes it (job reaches a terminal state).
         for event in client.stream_logs(job_id):
             if isinstance(event, LogEvent):
                 _append_line(job_id, event.line)
             elif isinstance(event, QueueStatusEvent):
                 _update(job_id, status=event.status)
+    except Exception:  # noqa: BLE001 - the log feed is non-essential
+        pass
 
+
+def _watch(client, job_id: str) -> None:
+    threading.Thread(target=_stream_into_panel, args=(client, job_id), daemon=True).start()
+    try:
+        # Poll the job status for the terminal state (Walt's recommended pattern)
+        # rather than waiting for the log stream to close.
         job = client.get_job(job_id)
+        waited = 0
+        while not job.is_terminal and waited < 7200:
+            time.sleep(5)
+            waited += 5
+            job = client.get_job(job_id)
+            _update(job_id, status=job.status)
+
         common = dict(
             exit_code=job.exit_code,
             image_cache_hit=job.image_cache_hit,
