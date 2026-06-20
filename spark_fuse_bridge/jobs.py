@@ -8,6 +8,8 @@ ready to list and download (no separate "output ready" signal).
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import tempfile
 import threading
 import time
@@ -138,6 +140,26 @@ def _extract_validation_error(lines: list[str]) -> str | None:
     return None
 
 
+def _unique_output_name(out_dir: Path, src_name: str) -> str:
+    """Return a filename that does not exist in out_dir, mimicking ComfyUI's
+    sequential numbering. The cloud always names its file '<prefix>_00001_.png';
+    pick the next free '<prefix>_NNNNN_.png' so renders accumulate locally."""
+    m = re.match(r"^(?P<prefix>.+?)_(?P<num>\d+)_\.(?P<ext>\w+)$", src_name)
+    if m:
+        prefix, ext = m.group("prefix"), m.group("ext")
+        rx = re.compile(rf"^{re.escape(prefix)}_(\d+)_\.{re.escape(ext)}$")
+        nums = [int(rx.match(p.name).group(1)) for p in out_dir.iterdir()
+                if p.is_file() and rx.match(p.name)]
+        nxt = (max(nums) + 1) if nums else 1
+        return f"{prefix}_{nxt:05d}_.{ext}"
+    stem, suffix = Path(src_name).stem, Path(src_name).suffix
+    candidate, i = src_name, 1
+    while (out_dir / candidate).exists():
+        candidate = f"{stem}_{i}{suffix}"
+        i += 1
+    return candidate
+
+
 def _stream_into_panel(client, job_id: str) -> None:
     """Best-effort live log feed for the panel. Completion is detected by polling
     the job status, not by this returning: the SSE stream can stay open well past
@@ -189,15 +211,26 @@ def _watch(client, job_id: str) -> None:
                 if base_url:
                     import folder_paths  # ComfyUI-provided; available at runtime
                     out_dir = Path(folder_paths.get_output_directory())
+                    out_dir.mkdir(parents=True, exist_ok=True)
                     _append_line(job_id, f"[bridge] downloading outputs from {base_url}")
-                    paths = client.download_outputs(base_url, out_dir)
+                    # Download to a temp dir, then move images into the output folder
+                    # under the next free sequential name, so repeated renders
+                    # accumulate (the cloud always names its file _00001_).
+                    dl_dir = Path(tempfile.mkdtemp(prefix="spark-fuse-out-"))
+                    paths = client.download_outputs(base_url, dl_dir)
                     images = [
                         p for p in paths
                         if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
                     ]
-                    if images:
-                        image_name = Path(images[0]).name
-                        _append_line(job_id, f"[bridge] downloaded {len(images)} image(s) to ComfyUI output")
+                    saved = []
+                    for p in images:
+                        name = _unique_output_name(out_dir, p.name)
+                        shutil.move(str(p), str(out_dir / name))
+                        saved.append(name)
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    if saved:
+                        image_name = saved[0]
+                        _append_line(job_id, f"[bridge] saved {len(saved)} image(s) to ComfyUI output: {', '.join(saved)}")
                     else:
                         _append_line(job_id, f"[bridge] succeeded but found no image in {len(paths)} output file(s)")
                 else:
