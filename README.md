@@ -68,8 +68,9 @@ Click the **⚡ Spark Fuse** button (top right), open **Credentials**, and set y
 host, email and password. Alternatively provide `SPARK_HOST`, `SPARK_EMAIL` and
 `SPARK_PASSWORD` in the environment. Set the **assets ShareSync path** (the folder
 that holds your model subfolders, for example `/comfy-flux2-klein/models`), choose
-a GPU, then **Save settings**. The image is digest-pinned in the settings file and
-can be updated when you publish a new build.
+a GPU, optionally set a **batch count** (see below), then **Save settings**. The
+runner image tracks the published `:latest` build, so image updates reach you
+automatically; image affinity still resolves it to a specific digest at submit time.
 
 ## Use
 
@@ -78,6 +79,16 @@ can be updated when you publish a new build.
    click **Render on Spark Fuse**.
 3. Watch progress in the panel. The image appears when the job finishes and is also
    saved in ComfyUI's output folder.
+
+## Batch render
+
+Set **Batch count** to render several images from one job. The job pays the cold
+start and loads the model once, then renders that many images in sequence, giving
+each a fresh seed so they differ. Because the renders run one after another rather
+than as a single large batch, VRAM use stays at one image's worth, and every image
+after the first costs only its sampling time rather than another full cold start.
+All the images are downloaded into ComfyUI's output folder, numbered so they do not
+overwrite earlier renders. The count is limited to between 1 and 100.
 
 ## Notes
 
