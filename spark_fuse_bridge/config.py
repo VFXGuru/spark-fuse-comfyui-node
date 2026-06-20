@@ -15,6 +15,10 @@ from spark_fuse import SparkFuseClient
 _ROOT = Path(__file__).resolve().parent.parent
 SETTINGS_PATH = _ROOT / "spark_fuse_settings.json"
 
+# The production API host is effectively constant for now; default to it so users
+# only need to supply their email and password.
+DEFAULT_HOST = "https://api.prod.aapse1.sparkcloud.studio"
+
 # The pinned, digest-referenced image is the most reliable for cached-image
 # affinity. Update this when you publish a new image build.
 DEFAULTS = {
@@ -26,7 +30,7 @@ DEFAULTS = {
     "model_base_dir": "/assets",
     "image_affinity": "required",
     # Credentials (optional here; env vars are the fallback)
-    "host": "",
+    "host": DEFAULT_HOST,
     "email": "",
     "password": "",
 }
@@ -61,12 +65,14 @@ def save_settings(values: dict) -> dict:
 def public_settings() -> dict:
     s = load_settings()
     out = {k: s.get(k, "") for k in PUBLIC_KEYS}
+    if not out.get("host"):
+        out["host"] = DEFAULT_HOST
     out["password_set"] = bool(s.get("password") or os.environ.get("SPARK_PASSWORD"))
     return out
 
 
 def _credentials(settings: dict) -> tuple[str, str, str]:
-    host = settings.get("host") or os.environ.get("SPARK_HOST", "")
+    host = settings.get("host") or os.environ.get("SPARK_HOST") or DEFAULT_HOST
     email = settings.get("email") or os.environ.get("SPARK_EMAIL", "")
     password = settings.get("password") or os.environ.get("SPARK_PASSWORD", "")
     return host, email, password

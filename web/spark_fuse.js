@@ -45,7 +45,7 @@ function buildPanel() {
   const emailInput = el("input", { id: "sf-email", type: "text", style: inputStyle() });
   const passInput = el("input", { id: "sf-pass", type: "password", placeholder: "(unchanged)", style: inputStyle() });
 
-  const saveBtn = el("button", { textContent: "Save settings", style: btnStyle("#3a3a3a"), onclick: saveSettings });
+  const saveBtn = el("button", { textContent: "Save settings", style: btnStyle("#3a3a3a"), onclick: async () => { await saveSettings(); await loadSkus(); } });
   const renderBtn = el("button", { id: "sf-render", textContent: "Render on Spark Fuse", style: btnStyle("#7c5cff"), onclick: onRender });
 
   const status = el("div", { id: "sf-status", style: "font-size:12px;margin:8px 0;min-height:16px;" });
