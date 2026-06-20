@@ -44,6 +44,7 @@ function buildPanel() {
   const hostInput = el("input", { id: "sf-host", type: "text", placeholder: "https://api.prod...", style: inputStyle() });
   const emailInput = el("input", { id: "sf-email", type: "text", style: inputStyle() });
   const passInput = el("input", { id: "sf-pass", type: "password", placeholder: "(unchanged)", style: inputStyle() });
+  const batchInput = el("input", { id: "sf-batch", type: "number", min: "1", max: "100", value: "1", style: inputStyle() });
 
   const saveBtn = el("button", { textContent: "Save settings", style: btnStyle("#3a3a3a"), onclick: async () => { await saveSettings(); await loadSkus(); } });
   const renderBtn = el("button", { id: "sf-render", textContent: "Render on Spark Fuse", style: btnStyle("#7c5cff") + "opacity:0.5;cursor:not-allowed;", disabled: true, onclick: onRender });
@@ -58,6 +59,7 @@ function buildPanel() {
     field("GPU", skuSelect), rateLabel,
     field("Assets ShareSync path (models)", assetsInput),
     field("Image affinity", affinitySelect),
+    field("Batch count (images per job)", batchInput),
     el("details", {}, el("summary", { textContent: "Credentials", style: "cursor:pointer;font-size:12px;margin-bottom:6px;" }),
        field("Host", hostInput), field("Email", emailInput), field("Password", passInput)),
     el("div", { style: "display:flex;gap:8px;margin:6px 0 10px;" }, saveBtn, renderBtn),
@@ -88,6 +90,7 @@ async function loadSettings() {
     const s = await api("/settings");
     document.getElementById("sf-assets").value = s.assets_share_sync_path || "";
     document.getElementById("sf-affinity").value = s.image_affinity || "preferred";
+    document.getElementById("sf-batch").value = s.batch_count || 1;
     document.getElementById("sf-host").value = s.host || "";
     document.getElementById("sf-email").value = s.email || "";
     if (s.password_set) document.getElementById("sf-pass").placeholder = "(stored — leave blank to keep)";
@@ -126,6 +129,7 @@ async function saveSettings() {
     instance_type: document.getElementById("sf-sku").value,
     assets_share_sync_path: document.getElementById("sf-assets").value,
     image_affinity: document.getElementById("sf-affinity").value,
+    batch_count: parseInt(document.getElementById("sf-batch").value, 10) || 1,
     host: document.getElementById("sf-host").value,
     email: document.getElementById("sf-email").value,
   };

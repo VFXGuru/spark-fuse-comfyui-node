@@ -72,6 +72,13 @@ def _normalize_model_paths(prompt: dict) -> None:
                 inputs[key] = value.replace("\\", "/")
 
 
+def _batch_count(settings: dict) -> int:
+    try:
+        return max(1, min(int(settings.get("batch_count") or 1), 100))
+    except (TypeError, ValueError):
+        return 1
+
+
 def submit_workflow(api_prompt: dict, instance_type: str | None = None) -> str:
     """Submit an API-format workflow to Spark Fuse and return the job id.
 
@@ -87,7 +94,10 @@ def submit_workflow(api_prompt: dict, instance_type: str | None = None) -> str:
         image=settings["image"],
         command=settings["command"],
         instance_type=instance_type or settings["instance_type"],
-        env={"MODEL_BASE_DIR": settings["model_base_dir"]},
+        env={
+            "MODEL_BASE_DIR": settings["model_base_dir"],
+            "BATCH_COUNT": str(_batch_count(settings)),
+        },
         input_push_mode="auto-prepare",
         assets_share_sync_path=settings.get("assets_share_sync_path") or None,
         assets_share_sync_space_name=settings.get("assets_share_sync_space_name") or None,

@@ -19,16 +19,19 @@ SETTINGS_PATH = _ROOT / "spark_fuse_settings.json"
 # only need to supply their email and password.
 DEFAULT_HOST = "https://api.prod.aapse1.sparkcloud.studio"
 
-# The pinned, digest-referenced image is the most reliable for cached-image
-# affinity. Update this when you publish a new image build.
+# image and command are node-version constants (always taken from here, never from
+# a stale saved settings file). ':latest' so users get image updates (such as batch
+# render) automatically; cached-image affinity still resolves it to a digest at
+# submit time.
 DEFAULTS = {
-    "image": "ghcr.io/vfxguru/spark-fuse-comfyui@sha256:08530e3e48924017bd6242b1ff6051fd5f0e81848e20d90745605c071182602d",
+    "image": "ghcr.io/vfxguru/spark-fuse-comfyui:latest",
     "command": ["python3.13", "/runner/spark_fuse_run.py"],
     "instance_type": "g7e.2xlarge",
     "assets_share_sync_path": "/comfy-flux2-klein/models",
     "assets_share_sync_space_name": "",
     "model_base_dir": "/assets",
     "image_affinity": "required",
+    "batch_count": 1,
     # Credentials (optional here; env vars are the fallback)
     "host": DEFAULT_HOST,
     "email": "",
@@ -39,7 +42,7 @@ DEFAULTS = {
 PUBLIC_KEYS = [
     "image", "instance_type", "assets_share_sync_path",
     "assets_share_sync_space_name", "model_base_dir", "image_affinity",
-    "host", "email",
+    "batch_count", "host", "email",
 ]
 
 
@@ -50,6 +53,9 @@ def load_settings() -> dict:
             data.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
+    # image/command are node-version constants; never honour a stale saved value.
+    data["image"] = DEFAULTS["image"]
+    data["command"] = DEFAULTS["command"]
     return data
 
 
