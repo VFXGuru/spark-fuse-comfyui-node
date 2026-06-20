@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -154,14 +155,24 @@ def _watch(client, job_id: str) -> None:
         )
 
         if job.status == "succeeded":
-            # Download the image BEFORE publishing the terminal status, so the UI
-            # never sees 'succeeded' without an image and stop polling too early.
+            # The resolved output URL can lag the terminal status by a moment, so
+            # retry briefly rather than skip the download. Download BEFORE publishing
+            # the terminal status, so the UI does not stop polling before the image.
+            base_url = job.output.share_sync_base_url if job.output else None
+            for _ in range(6):
+                if base_url:
+                    break
+                time.sleep(2)
+                job = client.get_job(job_id)
+                base_url = job.output.share_sync_base_url if job.output else None
+
             image_name = None
             try:
-                if job.output and job.output.share_sync_base_url:
+                if base_url:
                     import folder_paths  # ComfyUI-provided; available at runtime
                     out_dir = Path(folder_paths.get_output_directory())
-                    paths = client.download_outputs(job.output.share_sync_base_url, out_dir)
+                    _append_line(job_id, f"[bridge] downloading outputs from {base_url}")
+                    paths = client.download_outputs(base_url, out_dir)
                     images = [
                         p for p in paths
                         if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
@@ -170,9 +181,9 @@ def _watch(client, job_id: str) -> None:
                         image_name = Path(images[0]).name
                         _append_line(job_id, f"[bridge] downloaded {len(images)} image(s) to ComfyUI output")
                     else:
-                        _append_line(job_id, "[bridge] job succeeded but no image file was found")
+                        _append_line(job_id, f"[bridge] succeeded but found no image in {len(paths)} output file(s)")
                 else:
-                    _append_line(job_id, "[bridge] job succeeded but no output path was returned")
+                    _append_line(job_id, "[bridge] job succeeded but no output path was returned after retries")
             except Exception as exc:  # noqa: BLE001 - a download failure must not mark a good job failed
                 _append_line(job_id, f"[bridge] download failed: {exc}")
             _update(job_id, status=job.status, image=image_name, **common)
