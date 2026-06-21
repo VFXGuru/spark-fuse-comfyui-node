@@ -79,6 +79,42 @@ def _batch_count(settings: dict) -> int:
         return 1
 
 
+def _build_env(settings: dict, batch_count: int) -> dict:
+    return {
+        "MODEL_BASE_DIR": settings["model_base_dir"],
+        "BATCH_COUNT": str(batch_count),
+    }
+
+
+def _submit_job(client, api_prompt: dict, *, instance_type, settings, batch_count,
+                instance_handle: str | None = None):
+    """Submit one workflow job and stage its workflow.json; return CreateJobResponse.
+
+    Shared by the single-render path and the render queue. The tiny workflow.json
+    is pushed via auto-prepare; models come from the lazy read-only /assets mount;
+    image affinity steers placement. Pass instance_handle to route the job onto a
+    prepared warm session (§13).
+    """
+    resp = client.submit(
+        image=settings["image"],
+        command=settings["command"],
+        instance_type=instance_type or settings["instance_type"],
+        env=_build_env(settings, batch_count),
+        input_push_mode="auto-prepare",
+        assets_share_sync_path=settings.get("assets_share_sync_path") or None,
+        assets_share_sync_space_name=settings.get("assets_share_sync_space_name") or None,
+        image_affinity=settings.get("image_affinity") or None,
+        instance_handle=instance_handle,
+    )
+    if not (resp.input and resp.input.upload_url):
+        raise RuntimeError("No auto-prepare upload URL returned by Spark Fuse.")
+    # Stage the workflow as /input/workflow.json via the one-shot upload URL.
+    tmp = Path(tempfile.mkdtemp(prefix="spark-fuse-wf-"))
+    (tmp / "workflow.json").write_text(json.dumps(api_prompt), encoding="utf-8")
+    client.upload_input(tmp, resp.input.upload_url)
+    return resp
+
+
 def submit_workflow(api_prompt: dict, instance_type: str | None = None) -> str:
     """Submit an API-format workflow to Spark Fuse and return the job id.
 
@@ -90,32 +126,14 @@ def submit_workflow(api_prompt: dict, instance_type: str | None = None) -> str:
     client = make_client(settings)
     client.login()
 
-    resp = client.submit(
-        image=settings["image"],
-        command=settings["command"],
-        instance_type=instance_type or settings["instance_type"],
-        env={
-            "MODEL_BASE_DIR": settings["model_base_dir"],
-            "BATCH_COUNT": str(_batch_count(settings)),
-        },
-        input_push_mode="auto-prepare",
-        assets_share_sync_path=settings.get("assets_share_sync_path") or None,
-        assets_share_sync_space_name=settings.get("assets_share_sync_space_name") or None,
-        image_affinity=settings.get("image_affinity") or None,
-    )
+    try:
+        resp = _submit_job(client, api_prompt, instance_type=instance_type,
+                           settings=settings, batch_count=_batch_count(settings))
+    except Exception:
+        _close(client)
+        raise
     job_id = resp.job_id
     _update(job_id, status=resp.status, image=None, error=None)
-
-    if not (resp.input and resp.input.upload_url):
-        _update(job_id, status="failed",
-                error="No auto-prepare upload URL returned by Spark Fuse.")
-        _close(client)
-        return job_id
-
-    # Stage the workflow as /input/workflow.json via the one-shot upload URL.
-    tmp = Path(tempfile.mkdtemp(prefix="spark-fuse-wf-"))
-    (tmp / "workflow.json").write_text(json.dumps(api_prompt), encoding="utf-8")
-    client.upload_input(tmp, resp.input.upload_url)
 
     threading.Thread(target=_watch, args=(client, job_id), daemon=True).start()
     return job_id
@@ -170,6 +188,47 @@ def _unique_output_name(out_dir: Path, src_name: str) -> str:
     return candidate
 
 
+def _download_images(client, job, log=None) -> list[str]:
+    """Download a succeeded job's images into ComfyUI's output dir under fresh
+    sequential names; return the saved filenames. Shared by the single-render
+    watcher and the render queue. The output URL can lag terminal, so retry briefly."""
+    if log is None:
+        log = lambda _m: None  # noqa: E731
+    base_url = job.output.share_sync_base_url if job.output else None
+    for _ in range(6):
+        if base_url:
+            break
+        time.sleep(2)
+        job = client.get_job(job.id)
+        base_url = job.output.share_sync_base_url if job.output else None
+    if not base_url:
+        log("[bridge] job succeeded but no output path was returned after retries")
+        return []
+    import folder_paths  # ComfyUI-provided; available at runtime
+    out_dir = Path(folder_paths.get_output_directory())
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log(f"[bridge] downloading outputs from {base_url}")
+    # Download to a temp dir, then move images into the output folder under the next
+    # free sequential name so repeated renders accumulate (the cloud names _00001_).
+    dl_dir = Path(tempfile.mkdtemp(prefix="spark-fuse-out-"))
+    try:
+        paths = client.download_outputs(base_url, dl_dir)
+        images = [p for p in paths
+                  if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+        saved = []
+        for p in images:
+            name = _unique_output_name(out_dir, p.name)
+            shutil.move(str(p), str(out_dir / name))
+            saved.append(name)
+    finally:
+        shutil.rmtree(dl_dir, ignore_errors=True)
+    if saved:
+        log(f"[bridge] saved {len(saved)} image(s) to ComfyUI output: {', '.join(saved)}")
+    else:
+        log(f"[bridge] succeeded but found no image in {len(paths)} output file(s)")
+    return saved
+
+
 def _stream_into_panel(client, job_id: str) -> None:
     """Best-effort live log feed for the panel. Completion is detected by polling
     the job status, not by this returning: the SSE stream can stay open well past
@@ -205,46 +264,12 @@ def _watch(client, job_id: str) -> None:
         )
 
         if job.status == "succeeded":
-            # The resolved output URL can lag the terminal status by a moment, so
-            # retry briefly rather than skip the download. Download BEFORE publishing
-            # the terminal status, so the UI does not stop polling before the image.
-            base_url = job.output.share_sync_base_url if job.output else None
-            for _ in range(6):
-                if base_url:
-                    break
-                time.sleep(2)
-                job = client.get_job(job_id)
-                base_url = job.output.share_sync_base_url if job.output else None
-
+            # Download BEFORE publishing the terminal status, so the UI does not stop
+            # polling before the image lands.
             image_name = None
             try:
-                if base_url:
-                    import folder_paths  # ComfyUI-provided; available at runtime
-                    out_dir = Path(folder_paths.get_output_directory())
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    _append_line(job_id, f"[bridge] downloading outputs from {base_url}")
-                    # Download to a temp dir, then move images into the output folder
-                    # under the next free sequential name, so repeated renders
-                    # accumulate (the cloud always names its file _00001_).
-                    dl_dir = Path(tempfile.mkdtemp(prefix="spark-fuse-out-"))
-                    paths = client.download_outputs(base_url, dl_dir)
-                    images = [
-                        p for p in paths
-                        if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
-                    ]
-                    saved = []
-                    for p in images:
-                        name = _unique_output_name(out_dir, p.name)
-                        shutil.move(str(p), str(out_dir / name))
-                        saved.append(name)
-                    shutil.rmtree(dl_dir, ignore_errors=True)
-                    if saved:
-                        image_name = saved[0]
-                        _append_line(job_id, f"[bridge] saved {len(saved)} image(s) to ComfyUI output: {', '.join(saved)}")
-                    else:
-                        _append_line(job_id, f"[bridge] succeeded but found no image in {len(paths)} output file(s)")
-                else:
-                    _append_line(job_id, "[bridge] job succeeded but no output path was returned after retries")
+                saved = _download_images(client, job, log=lambda m: _append_line(job_id, m))
+                image_name = saved[0] if saved else None
             except Exception as exc:  # noqa: BLE001 - a download failure must not mark a good job failed
                 _append_line(job_id, f"[bridge] download failed: {exc}")
             _update(job_id, status=job.status, image=image_name, **common)

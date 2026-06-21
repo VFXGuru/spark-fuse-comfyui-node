@@ -90,6 +90,29 @@ after the first costs only its sampling time rather than another full cold start
 All the images are downloaded into ComfyUI's output folder, numbered so they do not
 overwrite earlier renders. The count is limited to between 1 and 100.
 
+## Render queue
+
+The queue runs several different workflows back to back on one warm instance.
+Spark Fuse pre-warms a single instance, every queued job runs on it with no cold
+start or image pull between jobs, and the instance is released when the queue ends.
+
+1. Open a workflow, set its **Batch count**, and click **Add to queue**. Repeat for
+   each workflow: open the next one, set its batch count, add it. Each item snapshots
+   the graph as it is when you add it.
+2. Click **Run queue**. The panel prepares the instance, then runs each item in turn,
+   downloading its images as it finishes and showing live progress. Per-item status
+   (queued / running / succeeded / failed) is shown in the list.
+3. **Cancel queue** stops after the current job and releases the instance.
+
+All queued workflows draw their models from the one shared library mounted at
+`/assets`, so sync every model any of them use into that single ShareSync folder,
+mirroring your local folder structure. The prepared instance is billed for the whole
+session, including the short gaps between jobs, so the queue is most economical run
+back to back rather than left idle. Each job is a fresh container that reloads its
+model from the node's local cache (fast, no network); batching within a single
+workflow still amortises model load best, while the queue removes provisioning and
+image pull between different workflows.
+
 ## Notes
 
 - The button and panel are deliberately a floating overlay so they work across

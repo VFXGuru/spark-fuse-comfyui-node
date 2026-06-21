@@ -10,7 +10,7 @@ import asyncio
 from aiohttp import web
 from server import PromptServer
 
-from . import config, jobs
+from . import config, jobs, render_queue
 
 routes = PromptServer.instance.routes
 
@@ -108,3 +108,39 @@ async def get_job(request):
     if state is None:
         return web.json_response({"error": "unknown job"}, status=404)
     return web.json_response(state)
+
+
+@routes.post("/spark_fuse/queue")
+async def post_queue(request):
+    body = await request.json()
+    items = body.get("items") or []
+    instance_type = body.get("instance_type")
+    if not items:
+        return web.json_response({"error": "No workflows in the queue."}, status=400)
+    for it in items:
+        wf = it.get("workflow") or it.get("prompt")
+        if not wf:
+            return web.json_response({"error": "A queued item is missing its workflow."}, status=400)
+        it["workflow"] = wf
+
+    try:
+        queue_id = await _run(lambda: render_queue.submit_queue(items, instance_type))
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({"queueId": queue_id})
+
+
+@routes.get("/spark_fuse/queue/{queue_id}")
+async def get_queue(request):
+    queue_id = request.match_info["queue_id"]
+    state = render_queue.get_queue_state(queue_id)
+    if state is None:
+        return web.json_response({"error": "unknown queue"}, status=404)
+    return web.json_response(state)
+
+
+@routes.post("/spark_fuse/queue/{queue_id}/cancel")
+async def cancel_queue(request):
+    queue_id = request.match_info["queue_id"]
+    render_queue.cancel_queue(queue_id)
+    return web.json_response({"ok": True})

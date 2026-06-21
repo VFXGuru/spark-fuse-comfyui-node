@@ -8,6 +8,9 @@ import { app } from "../../scripts/app.js";
 const api = (path, opts) => fetch(`/spark_fuse${path}`, opts).then((r) => r.json());
 
 let pollTimer = null;
+let queueItems = [];
+let queueRunning = false;
+let queueId = null;
 
 function el(tag, props = {}, ...children) {
   const node = Object.assign(document.createElement(tag), props);
@@ -49,6 +52,19 @@ function buildPanel() {
   const saveBtn = el("button", { textContent: "Save settings", style: btnStyle("#3a3a3a"), onclick: async () => { await saveSettings(); await loadSkus(); } });
   const renderBtn = el("button", { id: "sf-render", textContent: "Render on Spark Fuse", style: btnStyle("#7c5cff") + "opacity:0.5;cursor:not-allowed;", disabled: true, onclick: onRender });
 
+  const addQueueBtn = el("button", { id: "sf-add-queue", textContent: "Add to queue", style: smallBtn("#3a3a3a"), onclick: addToQueue });
+  const queueList = el("div", { id: "sf-queue-list", style: "display:flex;flex-direction:column;gap:3px;font-size:12px;margin:4px 0;" });
+  const runQueueBtn = el("button", { id: "sf-run-queue", textContent: "Run queue", style: btnStyle("#7c5cff"), onclick: runQueue });
+  const clearQueueBtn = el("button", { id: "sf-clear-queue", textContent: "Clear", style: btnStyle("#3a3a3a"), onclick: clearQueue });
+  const cancelQueueBtn = el("button", { id: "sf-cancel-queue", textContent: "Cancel queue",
+    style: "width:100%;padding:8px;border:none;border-radius:4px;background:#aa3333;color:#fff;cursor:pointer;font-size:13px;margin-top:6px;display:none;", onclick: cancelQueue });
+  const queueSection = el("div", { style: "border-top:1px solid #333;margin-top:6px;padding-top:8px;" },
+    el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;" },
+       el("strong", { textContent: "Render queue", style: "font-size:13px;" }), addQueueBtn),
+    queueList,
+    el("div", { style: "display:flex;gap:8px;" }, runQueueBtn, clearQueueBtn),
+    cancelQueueBtn);
+
   const status = el("div", { id: "sf-status", style: "font-size:12px;margin:8px 0;min-height:16px;" });
   const log = el("pre", { id: "sf-log", style: `background:#111;border:1px solid #333;border-radius:4px;padding:6px;
             height:280px;min-height:120px;resize:vertical;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0 0 8px;` });
@@ -63,6 +79,7 @@ function buildPanel() {
     el("details", {}, el("summary", { textContent: "Credentials", style: "cursor:pointer;font-size:12px;margin-bottom:6px;" }),
        field("Host", hostInput), field("Email", emailInput), field("Password", passInput)),
     el("div", { style: "display:flex;gap:8px;margin:6px 0 10px;" }, saveBtn, renderBtn),
+    queueSection,
     status, log, preview,
   );
   document.body.append(panel);
@@ -71,6 +88,7 @@ function buildPanel() {
 
 const inputStyle = () => "padding:4px;background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:3px;";
 const btnStyle = (bg) => `flex:1;padding:8px;border:none;border-radius:4px;background:${bg};color:#fff;cursor:pointer;font-size:13px;`;
+const smallBtn = (bg) => `padding:5px 10px;border:none;border-radius:4px;background:${bg};color:#fff;cursor:pointer;font-size:12px;`;
 
 function setStatus(text, color = "#ddd") {
   const s = document.getElementById("sf-status");
@@ -148,7 +166,9 @@ async function onRender() {
   log.textContent = "";
   const sku = document.getElementById("sf-sku").value;
   if (!sku) { setStatus("Pick a GPU first; the list may still be loading.", "#ff8888"); return; }
+  if (queueRunning) { setStatus("A render queue is running; wait for it to finish.", "#ff8888"); return; }
   setRenderEnabled(false);
+  setQueueButtonsEnabled(false);
   setStatus("Exporting workflow and submitting...", "#ffd479");
 
   try {
@@ -159,12 +179,13 @@ async function onRender() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ workflow: prompt.output, instance_type: sku }),
     });
-    if (res.error) { setStatus(`Submit failed: ${res.error}`, "#ff8888"); setRenderEnabled(true); return; }
+    if (res.error) { setStatus(`Submit failed: ${res.error}`, "#ff8888"); setRenderEnabled(true); setQueueButtonsEnabled(true); return; }
     setStatus(`Submitted job ${res.jobId}. Watching...`, "#ffd479");
     pollJob(res.jobId);
   } catch (e) {
     setStatus(`Error: ${e}`, "#ff8888");
     setRenderEnabled(true);
+    setQueueButtonsEnabled(true);
   }
 }
 
@@ -188,15 +209,149 @@ function pollJob(jobId) {
       clearInterval(pollTimer);
       pollTimer = null;
       setRenderEnabled(true);
+      setQueueButtonsEnabled(true);
       if (st.status === "failed" && st.error) setStatus(`Failed: ${st.error}`, "#ff8888");
     }
   }, 2500);
+}
+
+// ---- Render queue -------------------------------------------------------
+
+function setQueueButtonsEnabled(on) {
+  for (const id of ["sf-add-queue", "sf-run-queue", "sf-clear-queue"]) {
+    const b = document.getElementById(id);
+    if (b) { b.disabled = !on; b.style.opacity = on ? "1" : "0.5"; b.style.cursor = on ? "pointer" : "not-allowed"; }
+  }
+}
+
+function renderQueueList() {
+  const list = document.getElementById("sf-queue-list");
+  const runBtn = document.getElementById("sf-run-queue");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!queueItems.length) {
+    list.append(el("div", { textContent: "Queue is empty. Open a workflow, set a batch count, then Add to queue.", style: "opacity:0.6;" }));
+  }
+  queueItems.forEach((it, i) => {
+    const c = { succeeded: "#88ff88", failed: "#ff8888", running: "#ffd479", cancelled: "#ffaa55" }[it.status] || "#aaa";
+    const row = el("div", { style: "display:flex;justify-content:space-between;align-items:center;gap:6px;background:#181818;border:1px solid #333;border-radius:4px;padding:4px 6px;" },
+      el("span", { textContent: `${i + 1}. ${it.label} — ${it.batch_count} img`, style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" }),
+      el("span", { style: "display:flex;align-items:center;gap:6px;flex:none;" },
+        el("span", { textContent: it.status, style: `color:${c};font-size:11px;` }),
+        el("span", { textContent: "✕", title: "Remove", style: queueRunning ? "display:none;" : "cursor:pointer;opacity:0.7;", onclick: () => removeQueueItem(i) })));
+    list.append(row);
+  });
+  if (runBtn) runBtn.textContent = queueItems.length ? `Run queue (${queueItems.length})` : "Run queue";
+}
+
+async function addToQueue() {
+  if (queueRunning) return;
+  try {
+    const prompt = await app.graphToPrompt();
+    const batch = parseInt(document.getElementById("sf-batch").value, 10) || 1;
+    queueItems.push({ workflow: prompt.output, batch_count: batch, label: `Job ${queueItems.length + 1}`, status: "queued" });
+    renderQueueList();
+    setStatus(`Added to queue (${queueItems.length} total). Open the next workflow and add it too.`, "#88ff88");
+  } catch (e) {
+    setStatus(`Could not add to queue: ${e}`, "#ff8888");
+  }
+}
+
+function removeQueueItem(i) {
+  if (queueRunning) return;
+  queueItems.splice(i, 1);
+  renderQueueList();
+}
+
+function clearQueue() {
+  if (queueRunning) return;
+  queueItems = [];
+  renderQueueList();
+  setStatus("Queue cleared.", "#ddd");
+}
+
+function setQueueRunning(on) {
+  queueRunning = on;
+  for (const id of ["sf-add-queue", "sf-run-queue", "sf-clear-queue", "sf-render"]) {
+    const b = document.getElementById(id);
+    if (b) { b.disabled = on; b.style.opacity = on ? "0.5" : "1"; b.style.cursor = on ? "not-allowed" : "pointer"; }
+  }
+  const cancel = document.getElementById("sf-cancel-queue");
+  if (cancel) cancel.style.display = on ? "block" : "none";
+  if (!on) setRenderEnabled(!!document.getElementById("sf-sku").value);
+  renderQueueList();
+}
+
+async function runQueue() {
+  if (queueRunning) return;
+  if (!queueItems.length) { setStatus("Queue is empty.", "#ff8888"); return; }
+  const sku = document.getElementById("sf-sku").value;
+  if (!sku) { setStatus("Pick a GPU first; the list may still be loading.", "#ff8888"); return; }
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  const preview = document.getElementById("sf-preview");
+  const log = document.getElementById("sf-log");
+  preview.style.display = "none";
+  log.textContent = "";
+  queueItems.forEach((it) => (it.status = "queued"));
+  setQueueRunning(true);
+  setStatus(`Preparing a warm instance for ${queueItems.length} job(s)...`, "#ffd479");
+  try {
+    await saveSettings();
+    const res = await api("/queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: queueItems.map((it) => ({ workflow: it.workflow, batch_count: it.batch_count, label: it.label })),
+        instance_type: sku,
+      }),
+    });
+    if (res.error) { setStatus(`Queue failed: ${res.error}`, "#ff8888"); setQueueRunning(false); return; }
+    queueId = res.queueId;
+    pollQueue(queueId);
+  } catch (e) {
+    setStatus(`Error: ${e}`, "#ff8888");
+    setQueueRunning(false);
+  }
+}
+
+function pollQueue(qid) {
+  const log = document.getElementById("sf-log");
+  const preview = document.getElementById("sf-preview");
+  pollTimer = setInterval(async () => {
+    let st;
+    try { st = await api(`/queue/${qid}`); } catch { return; }
+    if (st.error && !st.status) return;
+    log.textContent = (st.lines || []).join("\n");
+    log.scrollTop = log.scrollHeight;
+    if (Array.isArray(st.items)) {
+      st.items.forEach((sit) => { if (queueItems[sit.index]) queueItems[sit.index].status = sit.status; });
+      renderQueueList();
+    }
+    const map = { preparing: "#ffd479", running: "#ffd479", succeeded: "#88ff88", failed: "#ff8888", cancelled: "#ffaa55" };
+    setStatus(`Queue: ${st.status || "?"}`, map[st.status] || "#ddd");
+    if (st.image) {
+      preview.src = `/view?filename=${encodeURIComponent(st.image)}&type=output&t=${Date.now()}`;
+      preview.style.display = "block";
+    }
+    if (["succeeded", "failed", "cancelled"].includes(st.status)) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      setQueueRunning(false);
+    }
+  }, 2500);
+}
+
+async function cancelQueue() {
+  if (!queueId) return;
+  setStatus("Cancelling queue (current job will be stopped)...", "#ffd479");
+  try { await api(`/queue/${queueId}/cancel`, { method: "POST" }); } catch (e) { /* best effort */ }
 }
 
 app.registerExtension({
   name: "SparkFuse.Bridge",
   async setup() {
     const panel = buildPanel();
+    renderQueueList();
     const button = el("button", {
       textContent: "⚡ Spark Fuse",
       style: `position:fixed;top:16px;right:16px;z-index:10000;padding:8px 12px;border:none;border-radius:6px;
