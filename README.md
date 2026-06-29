@@ -31,7 +31,7 @@ runs onto a node that already cached the image, so warm runs skip the image pull
 
 ## Requirements
 
-- A local ComfyUI install.
+- A local ComfyUI install running on Python 3.12 or newer.
 - A Spark Fuse account with API credentials.
 - Your model library staged once on ShareSync. See the
   [image repo's USER-GUIDE](https://github.com/VFXGuru/spark-fuse-comfyui/blob/main/USER-GUIDE.md).
