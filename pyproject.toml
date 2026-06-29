@@ -1,7 +1,7 @@
 [project]
 name = "spark-fuse-comfyui-node"
-version = "0.1.0"
-description = "ComfyUI extension to render the current workflow on Spark Fuse cloud GPUs"
+version = "0.1.1"
+description = "Click the ⚡ button to render your open ComfyUI workflow on a Spark Fuse cloud GPU and pull the result back into your graph. No CLI, no file export."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
