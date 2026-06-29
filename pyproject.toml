@@ -11,5 +11,5 @@ dependencies = [
 
 [tool.comfy]
 PublisherId = "vfxguru"
-DisplayName = "Spark Fuse Bridge"
+DisplayName = "Spark Fuse Cloud GPU Bridge"
 Repository = "https://github.com/VFXGuru/spark-fuse-comfyui-node"
