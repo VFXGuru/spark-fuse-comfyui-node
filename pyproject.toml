@@ -9,6 +9,9 @@ dependencies = [
     "spark-fuse-messenger>=0.3.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/VFXGuru/spark-fuse-comfyui-node"
+
 [tool.comfy]
 PublisherId = "vfxguru"
 DisplayName = "Spark Fuse Cloud GPU Bridge"
