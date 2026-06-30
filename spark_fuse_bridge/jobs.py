@@ -8,6 +8,7 @@ ready to list and download (no separate "output ready" signal).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import tempfile
@@ -15,6 +16,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from typing import NamedTuple
 
 from spark_fuse.models import LogEvent, QueueStatusEvent
 
@@ -24,6 +26,7 @@ from .config import load_settings, make_client
 _JOBS: dict[str, dict] = {}
 _LOCK = threading.Lock()
 _MAX_LINES = 400
+_log = logging.getLogger(__name__)
 
 
 def _update(job_id: str, **fields) -> None:
@@ -86,6 +89,94 @@ def _build_env(settings: dict, batch_count: int) -> dict:
     }
 
 
+# Add video/audio loaders here as one-line entries, e.g. "VHS_LoadVideo": ["video"].
+INPUT_FILE_NODES: dict[str, list[str]] = {
+    "LoadImage":     ["image"],
+    "LoadImageMask": ["image"],
+}
+
+
+class _StagedFile(NamedTuple):
+    node_id: str
+    class_type: str
+    field: str
+    src: Path
+    dest_rel: str
+
+
+def _collect_input_files(workflow: dict, input_dir: Path) -> list[_StagedFile]:
+    """Pure: scan workflow for input-file references; return planned copies.
+
+    Checks each node whose class_type is in INPUT_FILE_NODES, reads the listed
+    widget fields, and builds a _StagedFile record per string value. Non-string
+    values (node links such as ["12", 0]) are silently skipped. Values annotated
+    [output]/[temp] are skipped with a warning. Subfolder paths are preserved.
+    Deduped on dest_rel. No filesystem access — fully unit-testable.
+    """
+    seen: set[str] = set()
+    result: list[_StagedFile] = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        fields = INPUT_FILE_NODES.get(class_type)
+        if not fields:
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for field in fields:
+            value = inputs.get(field)
+            if not isinstance(value, str):
+                continue
+            if value.endswith(" [output]") or value.endswith(" [temp]"):
+                _log.warning(
+                    "node %s (%s) field %r: %r has an [output]/[temp] annotation; skipping",
+                    node_id, class_type, field, value,
+                )
+                continue
+            filename = value[: -len(" [input]")] if value.endswith(" [input]") else value
+            filename = filename.replace("\\", "/")
+            if filename in seen:
+                continue
+            seen.add(filename)
+            result.append(_StagedFile(
+                node_id=node_id,
+                class_type=class_type,
+                field=field,
+                src=input_dir / filename,
+                dest_rel=filename,
+            ))
+    return result
+
+
+def _stage_input_files(workflow: dict, staging_dir: Path) -> None:
+    """Copy each planned input file into staging_dir, mirroring its relative path.
+
+    Warns and skips files that do not exist locally; never raises. Calls
+    folder_paths at runtime (ComfyUI-provided; not importable at module load time).
+    """
+    import folder_paths  # ComfyUI-provided; available at runtime
+    planned = _collect_input_files(workflow, Path(folder_paths.get_input_directory()))
+    staged = 0
+    for sf in planned:
+        if not sf.src.exists():
+            _log.warning(
+                "node %s (%s) field %r: %r not found locally; skipping",
+                sf.node_id, sf.class_type, sf.field, str(sf.src),
+            )
+            continue
+        dest = staging_dir / sf.dest_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sf.src, dest)
+        _log.info(
+            "staged node %s (%s) %s -> %s",
+            sf.node_id, sf.class_type, sf.src, sf.dest_rel,
+        )
+        staged += 1
+    _log.info("staged %d input file(s)", staged)
+
+
 def _submit_job(client, api_prompt: dict, *, instance_type, settings, batch_count,
                 instance_handle: str | None = None):
     """Submit one workflow job and stage its workflow.json; return CreateJobResponse.
@@ -111,6 +202,7 @@ def _submit_job(client, api_prompt: dict, *, instance_type, settings, batch_coun
     # Stage the workflow as /input/workflow.json via the one-shot upload URL.
     tmp = Path(tempfile.mkdtemp(prefix="spark-fuse-wf-"))
     (tmp / "workflow.json").write_text(json.dumps(api_prompt), encoding="utf-8")
+    _stage_input_files(api_prompt, tmp)
     client.upload_input(tmp, resp.input.upload_url)
     return resp
 

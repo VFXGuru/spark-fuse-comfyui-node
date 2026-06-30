@@ -12,6 +12,10 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/VFXGuru/spark-fuse-comfyui-node"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
+
 [tool.comfy]
 PublisherId = "vfxguru"
 DisplayName = "Spark Fuse Cloud GPU Bridge"

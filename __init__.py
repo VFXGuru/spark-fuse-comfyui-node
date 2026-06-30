@@ -8,7 +8,8 @@ This is an extension, not a graph node: there are no NODE_CLASS_MAPPINGS entries
 The whole workflow runs in the cloud, so a "Render on Spark Fuse" button ships the
 current graph to Spark Fuse rather than executing it locally.
 """
-from .spark_fuse_bridge import routes  # noqa: F401  (import registers the routes)
+if __package__:  # relative import only works inside a package (i.e. loaded by ComfyUI)
+    from .spark_fuse_bridge import routes  # noqa: F401  (import registers the routes)
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
