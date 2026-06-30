@@ -15,6 +15,7 @@ import time
 import traceback
 import uuid
 
+from spark_fuse.errors import NoWarmPoolCapacityError
 from spark_fuse.models import LogEvent
 
 from . import jobs
@@ -23,11 +24,15 @@ from .config import load_settings, make_client
 _QUEUES: dict[str, dict] = {}
 _LOCK = threading.Lock()
 _MAX_LINES = 600
-# Session idle-hold ceiling. The hold re-arms after each job and we release the
-# instance explicitly when the queue ends, so a generous value just covers the gaps.
-_HOLD_SECONDS = 3600
+# Session idle-hold ceiling. The clock starts at 'ready' and re-arms after each
+# job is submitted, so this is an IDLE ceiling between jobs, not a total-queue
+# ceiling. 600s (10 min) is generous for the gaps between jobs while keeping
+# billing exposure low on a crash or hard kill.
+_HOLD_SECONDS = 600
 _READY_TIMEOUT = 900   # max seconds to wait for the instance to report ready
 _JOB_TIMEOUT = 7200    # per-job safety ceiling
+_AFFINITY_RETRIES = 3  # attempts on NoWarmPoolCapacityError before fallback/abort
+_AFFINITY_RETRY_SLEEP = 5  # seconds between capacity-retry attempts
 
 
 def _clamp(value) -> int:
@@ -180,28 +185,55 @@ def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings:
     try:
         client.login()
         sku = instance_type or settings["instance_type"]
-        _append(qid, f"[queue] preparing a warm {sku} instance for {len(items)} job(s)")
-        session = client.prepare_instance(instance_type=sku, hold_seconds=_HOLD_SECONDS)
-        handle = session.instance_handle
-        _set(qid, instance_handle=handle)
+        affinity = (settings.get("session_affinity") or "preferred").lower()
 
-        # Wait until the session is ready (or fails) before routing jobs to it.
-        waited = 0
-        while not session.is_ready and not session.is_terminal:
-            if _cancelled(qid):
-                _set(qid, status="cancelled")
-                return
-            if waited >= _READY_TIMEOUT:
-                raise RuntimeError("instance did not become ready in time")
-            time.sleep(5)
-            waited += 5
-            session = client.get_instance(handle)
-        if not session.is_ready:
-            raise RuntimeError(
-                f"instance prepare {session.status}: "
-                f"{session.error_code or ''} {session.error_message or ''}".strip())
+        # Attempt to prepare a warm session; retry on capacity pressure.
+        session = None
+        for attempt in range(1, _AFFINITY_RETRIES + 1):
+            try:
+                _append(qid, f"[queue] preparing a warm {sku} instance "
+                             f"for {len(items)} job(s) (attempt {attempt}/{_AFFINITY_RETRIES})")
+                session = client.prepare_instance(instance_type=sku, hold_seconds=_HOLD_SECONDS)
+                break
+            except NoWarmPoolCapacityError:
+                _append(qid, f"[queue] no warm-pool capacity (attempt {attempt}/{_AFFINITY_RETRIES})")
+                if attempt < _AFFINITY_RETRIES:
+                    time.sleep(_AFFINITY_RETRY_SLEEP)
 
-        _append(qid, f"[queue] instance ready; running {len(items)} job(s) back to back")
+        if session is None:
+            if affinity == "required":
+                raise NoWarmPoolCapacityError(
+                    f"No warm-pool capacity after {_AFFINITY_RETRIES} attempts; "
+                    "session_affinity=required — queue aborted"
+                )
+            _append(qid, "[queue] no warm-pool capacity after retries; "
+                         "running without a warm session (cold starts apply)")
+
+        if session is not None:
+            handle = session.instance_handle
+            _set(qid, instance_handle=handle)
+
+            # Wait until the session is ready (or fails) before routing jobs to it.
+            # Keeps its own loop (not client.wait_until_ready) to honour _cancelled().
+            waited = 0
+            while not session.is_ready and not session.is_terminal:
+                if _cancelled(qid):
+                    _set(qid, status="cancelled")
+                    return
+                if waited >= _READY_TIMEOUT:
+                    raise RuntimeError("instance did not become ready in time")
+                time.sleep(5)
+                waited += 5
+                session = client.get_instance(handle)
+            if not session.is_ready:
+                raise RuntimeError(
+                    f"instance prepare {session.status}: "
+                    f"{session.error_code or ''} {session.error_message or ''}".strip())
+
+            _append(qid, f"[queue] instance ready; running {len(items)} job(s) back to back")
+        else:
+            _append(qid, f"[queue] running {len(items)} job(s) without a warm session")
+
         _set(qid, status="running")
 
         for i, it in enumerate(items):

@@ -1,12 +1,12 @@
 [project]
 name = "spark-fuse-comfyui-node"
-version = "0.1.1"
+version = "0.1.2"
 description = "Click the ⚡ button to render your open ComfyUI workflow on a Spark Fuse cloud GPU and pull the result back into your graph. No CLI, no file export."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
 dependencies = [
-    "spark-fuse-messenger>=0.3.0",
+    "spark-fuse-messenger>=0.4.0",
 ]
 
 [project.urls]
