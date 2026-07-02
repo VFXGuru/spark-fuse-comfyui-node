@@ -10,7 +10,7 @@ import asyncio
 from aiohttp import web
 from server import PromptServer
 
-from . import config, jobs, render_queue
+from . import config, jobs, model_sync, render_queue
 
 routes = PromptServer.instance.routes
 
@@ -143,4 +143,57 @@ async def get_queue(request):
 async def cancel_queue(request):
     queue_id = request.match_info["queue_id"]
     render_queue.cancel_queue(queue_id)
+    return web.json_response({"ok": True})
+
+
+# ---- Pre-render model sync ----------------------------------------------
+
+
+@routes.post("/spark_fuse/models/check")
+async def post_models_check(request):
+    body = await request.json()
+    workflows = body.get("workflows") or []
+    if not workflows:
+        return web.json_response({"error": "No workflows provided."}, status=400)
+    try:
+        result = await _run(lambda: model_sync.check_models(workflows))
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(result)
+
+
+@routes.post("/spark_fuse/models/upload")
+async def post_models_upload(request):
+    body = await request.json()
+    files = body.get("files") or []
+    if not files:
+        return web.json_response({"error": "No files to upload."}, status=400)
+    # The browser nominates {folder, name} pairs from a check result; local
+    # paths, sizes and destinations are re-derived server-side.
+    try:
+        prepared = await _run(lambda: model_sync.prepare_upload_files(files))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": str(exc)}, status=400)
+    upload_id = model_sync.start_upload(prepared)
+    return web.json_response({"uploadId": upload_id})
+
+
+@routes.get("/spark_fuse/models/upload/{upload_id}")
+async def get_models_upload(request):
+    state = model_sync.get_upload_state(request.match_info["upload_id"])
+    if state is None:
+        return web.json_response({"error": "unknown upload"}, status=404)
+    return web.json_response(state)
+
+
+@routes.get("/spark_fuse/models/uploads")
+async def get_models_uploads(request):
+    return web.json_response({"uploads": model_sync.list_uploads()})
+
+
+@routes.post("/spark_fuse/models/upload/{upload_id}/cancel")
+async def cancel_models_upload(request):
+    model_sync.cancel_upload(request.match_info["upload_id"])
     return web.json_response({"ok": True})

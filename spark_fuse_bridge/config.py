@@ -32,6 +32,10 @@ DEFAULTS = {
     "model_base_dir": "/assets",
     "image_affinity": "required",
     "batch_count": 1,
+    # Pre-render model sync: largest single model the bridge will upload in-node,
+    # in GB. A practicality guard against huge non-resumable transfers, not a
+    # server limit (ShareSync allows 2 TB per file). 0 disables the guard.
+    "upload_guard_gb": 50,
     # Credentials (optional here; env vars are the fallback)
     "host": DEFAULT_HOST,
     "email": "",

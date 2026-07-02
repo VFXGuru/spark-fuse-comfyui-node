@@ -11,6 +11,11 @@ let pollTimer = null;
 let queueItems = [];
 let queueRunning = false;
 let queueId = null;
+// Pre-render model sync: the active background upload (id) and its poll loop.
+// The upload itself runs server-side; these only drive the progress badge.
+let uploadPollTimer = null;
+let activeUploadId = null;
+let uploadBadge = null;
 
 function el(tag, props = {}, ...children) {
   const node = Object.assign(document.createElement(tag), props);
@@ -65,6 +70,10 @@ function buildPanel() {
     el("div", { style: "display:flex;gap:8px;" }, runQueueBtn, clearQueueBtn),
     cancelQueueBtn);
 
+  // Model-sync consent section — hidden until a check finds models to resolve.
+  const consentSection = el("div", { id: "sf-consent",
+    style: "display:none;border-top:1px solid #333;margin-top:6px;padding-top:8px;" });
+
   const status = el("div", { id: "sf-status", style: "font-size:12px;margin:8px 0;min-height:16px;" });
   const log = el("pre", { id: "sf-log", style: `background:#111;border:1px solid #333;border-radius:4px;padding:6px;
             height:280px;min-height:120px;resize:vertical;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0 0 8px;` });
@@ -80,6 +89,7 @@ function buildPanel() {
        field("Host", hostInput), field("Email", emailInput), field("Password", passInput)),
     el("div", { style: "display:flex;gap:8px;margin:6px 0 10px;" }, saveBtn, renderBtn),
     queueSection,
+    consentSection,
     status, log, preview,
   );
   document.body.append(panel);
@@ -159,7 +169,6 @@ async function saveSettings() {
 
 async function onRender() {
   if (pollTimer) clearInterval(pollTimer);
-  const renderBtn = document.getElementById("sf-render");
   const log = document.getElementById("sf-log");
   const preview = document.getElementById("sf-preview");
   preview.style.display = "none";
@@ -169,24 +178,291 @@ async function onRender() {
   if (queueRunning) { setStatus("A render queue is running; wait for it to finish.", "#ff8888"); return; }
   setRenderEnabled(false);
   setQueueButtonsEnabled(false);
-  setStatus("Exporting workflow and submitting...", "#ffd479");
 
   try {
+    // saveSettings first so the model check reads the assets path submit will use.
     await saveSettings();
     const prompt = await app.graphToPrompt();
-    const res = await api("/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workflow: prompt.output, instance_type: sku }),
-    });
-    if (res.error) { setStatus(`Submit failed: ${res.error}`, "#ff8888"); setRenderEnabled(true); setQueueButtonsEnabled(true); return; }
-    setStatus(`Submitted job ${res.jobId}. Watching...`, "#ffd479");
-    pollJob(res.jobId);
+    const workflow = prompt.output;
+    await modelGate([workflow], () => submitRender(workflow, sku));
   } catch (e) {
     setStatus(`Error: ${e}`, "#ff8888");
     setRenderEnabled(true);
     setQueueButtonsEnabled(true);
   }
+}
+
+async function submitRender(workflow, sku) {
+  setStatus("Submitting...", "#ffd479");
+  const res = await api("/submit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workflow, instance_type: sku }),
+  });
+  if (res.error) { setStatus(`Submit failed: ${res.error}`, "#ff8888"); setRenderEnabled(true); setQueueButtonsEnabled(true); return; }
+  setStatus(`Submitted job ${res.jobId}. Watching...`, "#ffd479");
+  pollJob(res.jobId);
+}
+
+// ---- Pre-render model sync ----------------------------------------------
+// Gate every render/queue submit behind a ShareSync model check. Nothing
+// uploads without explicit consent; nothing submits while models are missing.
+
+function fmtBytes(n) {
+  if (n == null) return "?";
+  if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(1) + " GB";
+  if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+  return n + " B";
+}
+
+function fmtEta(secs) {
+  if (!isFinite(secs) || secs < 0) return "?";
+  if (secs < 60) return Math.ceil(secs) + "s";
+  if (secs < 3600) return Math.ceil(secs / 60) + "m";
+  return Math.floor(secs / 3600) + "h " + Math.ceil((secs % 3600) / 60) + "m";
+}
+
+function reenableSubmitButtons() {
+  setRenderEnabled(!!document.getElementById("sf-sku").value);
+  setQueueButtonsEnabled(true);
+}
+
+async function modelGate(workflows, proceed) {
+  setStatus("Checking models on ShareSync...", "#ffd479");
+  let res;
+  try {
+    res = await api("/models/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workflows }),
+    });
+  } catch (e) {
+    setStatus(`Model check failed: ${e}. Nothing was submitted.`, "#ff8888");
+    reenableSubmitButtons();
+    return;
+  }
+  if (res.error) {
+    setStatus(`Model check failed: ${res.error}. Nothing was submitted.`, "#ff8888");
+    reenableSubmitButtons();
+    return;
+  }
+  if (res.missing && res.missing.length) {
+    const names = res.missing.map((m) => `${m.folder}/${m.name}`).join(", ");
+    setStatus(`Model(s) not found locally or on ShareSync: ${names}. Nothing was submitted.`, "#ff8888");
+    reenableSubmitButtons();
+    return;
+  }
+  if (res.uploading && res.uploading.length) {
+    setStatus("A model upload is still in progress (see the badge under the ⚡ button). " +
+              "Wait for it to finish, then render again.", "#ffd479");
+    reenableSubmitButtons();
+    return;
+  }
+  const uploadable = res.uploadable || [];
+  const overLimit = res.over_limit || [];
+  if (uploadable.length || overLimit.length) {
+    showModelConsent(uploadable, overLimit, proceed);
+    return;
+  }
+  await proceed();
+}
+
+function showModelConsent(uploadable, overLimit, proceed) {
+  const box = document.getElementById("sf-consent");
+  box.innerHTML = "";
+  const hide = () => { box.style.display = "none"; box.innerHTML = ""; };
+  const total = uploadable.reduce((s, m) => s + (m.size || 0), 0);
+  const rowStyle = "display:flex;justify-content:space-between;gap:6px;background:#181818;" +
+                   "border:1px solid #333;border-radius:4px;padding:4px 6px;font-size:12px;";
+
+  box.append(el("strong", { textContent: "These models are not on ShareSync yet",
+                            style: "font-size:13px;" }));
+  const list = el("div", { style: "display:flex;flex-direction:column;gap:3px;margin:6px 0;" });
+  for (const m of uploadable) {
+    list.append(el("div", { style: rowStyle },
+      el("span", { textContent: `${m.folder}/${m.name}`,
+                   style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" }),
+      el("span", { textContent: fmtBytes(m.size) + (m.size_mismatch ? " (will overwrite the cloud copy)" : ""),
+                   style: "flex:none;color:#ffd479;" })));
+  }
+  for (const m of overLimit) {
+    list.append(el("div", { style: rowStyle + "border-color:#7a5a2a;" },
+      el("span", { textContent:
+        `${m.folder}/${m.name} — ${fmtBytes(m.size)}; exceeds the configured ` +
+        `${fmtBytes(m.guard_bytes)} upload guard. Stage via the ShareSync desktop app, ` +
+        `or raise upload_guard_gb in settings.`,
+        style: "color:#ffaa55;white-space:normal;" })));
+  }
+  box.append(list);
+  if (uploadable.length) {
+    box.append(el("div", {
+      textContent: `Total upload: ${fmtBytes(total)}. Uploads continue while ComfyUI stays open; ` +
+                   "closing ComfyUI itself stops them.",
+      style: "font-size:11px;opacity:0.7;margin-bottom:6px;" }));
+  }
+
+  const files = uploadable.map((m) => ({ folder: m.folder, name: m.name }));
+  const buttons = el("div", { style: "display:flex;flex-direction:column;gap:6px;" });
+  if (uploadable.length) {
+    buttons.append(el("button", {
+      textContent: `Upload ${uploadable.length} model(s) (${fmtBytes(total)}), then render`,
+      style: btnStyle("#7c5cff"),
+      onclick: async () => { hide(); await startModelUpload(files, proceed); },
+    }));
+    buttons.append(el("button", {
+      textContent: "Upload for next time (render cancelled)",
+      style: btnStyle("#3a3a3a"),
+      onclick: async () => {
+        hide();
+        await startModelUpload(files, null);
+        reenableSubmitButtons();
+      },
+    }));
+  } else {
+    buttons.append(el("button", {
+      textContent: "Render anyway (models must be staged another way)",
+      style: btnStyle("#7c5cff"),
+      onclick: async () => { hide(); await proceed(); },
+    }));
+  }
+  buttons.append(el("button", {
+    textContent: "Cancel",
+    style: btnStyle("#aa3333"),
+    onclick: () => {
+      hide();
+      reenableSubmitButtons();
+      setStatus("Cancelled. Nothing was uploaded or submitted.", "#ddd");
+    },
+  }));
+  box.append(buttons);
+  box.style.display = "block";
+  setStatus(`${uploadable.length + overLimit.length} model(s) need attention before rendering.`, "#ffd479");
+}
+
+async function startModelUpload(files, thenRender) {
+  try {
+    const res = await api("/models/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files }),
+    });
+    if (res.error) {
+      setStatus(`Upload failed to start: ${res.error}`, "#ff8888");
+      reenableSubmitButtons();
+      return;
+    }
+    activeUploadId = res.uploadId;
+    setStatus(thenRender ? "Uploading models, then rendering..." :
+                           "Uploading models in the background. Render was not submitted.", "#ffd479");
+    pollUploads(res.uploadId, thenRender);
+  } catch (e) {
+    setStatus(`Upload failed to start: ${e}`, "#ff8888");
+    reenableSubmitButtons();
+  }
+}
+
+function pollUploads(uploadId, thenRender) {
+  if (uploadPollTimer) clearInterval(uploadPollTimer);
+  const samples = [];
+  uploadPollTimer = setInterval(async () => {
+    let st;
+    try { st = await api(`/models/upload/${uploadId}`); } catch { return; }
+    if (st.error && !st.status) return;
+    updateUploadBadge(st, samples);
+    if (["done", "failed", "cancelled"].includes(st.status)) {
+      clearInterval(uploadPollTimer);
+      uploadPollTimer = null;
+      activeUploadId = null;
+      if (st.status === "done") {
+        setUploadBadge("✓ model sync complete", "#274a27");
+        setTimeout(hideUploadBadge, 8000);
+        if (thenRender) { await thenRender(); }
+        else { setStatus("Model upload complete.", "#88ff88"); }
+      } else if (st.status === "failed") {
+        setUploadBadge("✕ model upload failed", "#5a2727");
+        setStatus(`Model upload failed: ${st.error || "unknown error"}. ` +
+                  "It will be re-offered on the next render.", "#ff8888");
+        if (thenRender) reenableSubmitButtons();
+      } else {
+        hideUploadBadge();
+        setStatus("Model upload cancelled. Nothing was submitted.", "#ffaa55");
+        if (thenRender) reenableSubmitButtons();
+      }
+    }
+  }, 2000);
+}
+
+// The badge is a fixed element under the floating ⚡ button — deliberately NOT
+// inside the panel, so background-upload progress survives the panel closing.
+function ensureUploadBadge() {
+  if (uploadBadge) return uploadBadge;
+  uploadBadge = el("div", {
+    id: "spark-fuse-upload-badge",
+    style: `position:fixed;top:54px;right:16px;z-index:10000;display:none;align-items:center;gap:8px;
+            padding:6px 10px;border-radius:6px;background:#2a2a44;color:#fff;font-family:sans-serif;
+            font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,0.4);max-width:420px;`,
+  },
+    el("span", { id: "sf-badge-text", textContent: "",
+                 style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" }),
+    el("span", {
+      textContent: "✕", title: "Cancel upload",
+      style: "cursor:pointer;opacity:0.7;flex:none;",
+      onclick: async () => {
+        if (!activeUploadId) return;
+        try { await api(`/models/upload/${activeUploadId}/cancel`, { method: "POST" }); } catch { /* best effort */ }
+      },
+    }));
+  document.body.append(uploadBadge);
+  return uploadBadge;
+}
+
+function setUploadBadge(text, bg) {
+  const badge = ensureUploadBadge();
+  badge.style.display = "flex";
+  if (bg) badge.style.background = bg;
+  const t = document.getElementById("sf-badge-text");
+  if (t) t.textContent = text;
+}
+
+function hideUploadBadge() {
+  if (uploadBadge) uploadBadge.style.display = "none";
+}
+
+function updateUploadBadge(st, samples) {
+  const files = st.files || [];
+  const total = files.reduce((s, f) => s + (f.size || 0), 0);
+  const sent = files.reduce((s, f) => s + (f.status === "done" ? (f.size || 0) : (f.sent || 0)), 0);
+  const active = files.find((f) => f.status === "uploading");
+  samples.push({ t: Date.now(), sent });
+  while (samples.length > 15) samples.shift();
+  let eta = "";
+  if (samples.length >= 2) {
+    const first = samples[0], last = samples[samples.length - 1];
+    const rate = (last.sent - first.sent) / Math.max((last.t - first.t) / 1000, 0.001);
+    if (rate > 0) eta = `, ~${fmtEta((total - sent) / rate)} left`;
+  }
+  const pct = total ? Math.floor((sent / total) * 100) : 0;
+  const name = active ? active.name.split("/").pop() : "models";
+  const text = `⬆ ${name}: ${pct}% (${fmtBytes(sent)} / ${fmtBytes(total)}${eta})`;
+  setUploadBadge(text, "#2a2a44");
+  // Mirror into the panel status line when it is open (harmless when hidden).
+  if (document.getElementById("spark-fuse-panel")?.style.display === "block") {
+    setStatus(`Model upload: ${text}`, "#ffd479");
+  }
+}
+
+// After a tab reload the server-side upload keeps running; re-attach the badge.
+async function reattachUploads() {
+  try {
+    const data = await api("/models/uploads");
+    const entries = Object.entries(data.uploads || {});
+    const active = entries.find(([, st]) => st.status === "queued" || st.status === "running");
+    if (active) {
+      activeUploadId = active[0];
+      pollUploads(active[0], null);
+    }
+  } catch { /* best effort */ }
 }
 
 function pollJob(jobId) {
@@ -293,10 +569,25 @@ async function runQueue() {
   preview.style.display = "none";
   log.textContent = "";
   queueItems.forEach((it) => (it.status = "queued"));
+  setRenderEnabled(false);
+  setQueueButtonsEnabled(false);
+  try {
+    await saveSettings();
+    // One consolidated check + consent for every queued workflow, before the
+    // warm instance is prepared (its idle-hold clock must not run during
+    // consent clicks or multi-GB uploads).
+    const workflows = queueItems.map((it) => it.workflow);
+    await modelGate(workflows, () => submitQueue(sku));
+  } catch (e) {
+    setStatus(`Error: ${e}`, "#ff8888");
+    reenableSubmitButtons();
+  }
+}
+
+async function submitQueue(sku) {
   setQueueRunning(true);
   setStatus(`Preparing a warm instance for ${queueItems.length} job(s)...`, "#ffd479");
   try {
-    await saveSettings();
     const res = await api("/queue", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -352,6 +643,7 @@ app.registerExtension({
   async setup() {
     const panel = buildPanel();
     renderQueueList();
+    reattachUploads();  // a server-side upload may have outlived a tab reload
     const button = el("button", {
       textContent: "⚡ Spark Fuse",
       style: `position:fixed;top:16px;right:16px;z-index:10000;padding:8px 12px;border:none;border-radius:6px;
