@@ -28,6 +28,24 @@ Models are not uploaded per render. They live on ShareSync, staged once, and are
 mounted read-only and lazily at `/assets`, cached on the compute node across jobs.
 Only the small `workflow.json` is sent each time. Image affinity steers repeated
 runs onto a node that already cached the image, so warm runs skip the image pull.
+If a workflow references models that are not on ShareSync yet, the bridge detects
+that before submitting and offers to upload them (see
+[Pre-render model sync](#pre-render-model-sync)).
+
+## When it makes sense
+
+Be honest with yourself about the trade-off: every cloud render pays a per-job
+startup overhead (provisioning, image pull on a cold node, model load) before the
+first sampling step, so a fast local GPU will beat the cloud on models that fit in
+your VRAM. The bridge earns its keep in three situations:
+
+- **Models beyond your local VRAM.** Run checkpoints and text encoders your card
+  cannot hold, on a GPU class you do not own.
+- **Long batch queues you want off your machine.** Queue the work, keep using (or
+  switch off) your workstation; the warm-instance queue amortises the startup cost
+  across many jobs.
+- **No-GPU or low-VRAM machines.** Author workflows anywhere ComfyUI runs and let
+  the cloud do all the lifting.
 
 ## Requirements
 
@@ -112,6 +130,56 @@ back to back rather than left idle. Each job is a fresh container that reloads i
 model from the node's local cache (fast, no network); batching within a single
 workflow still amortises model load best, while the queue removes provisioning and
 image pull between different workflows.
+
+## Pre-render model sync
+
+Before anything is submitted, the bridge scans the workflow (or, for the queue,
+every queued workflow at once) for the models it references — checkpoints, LoRAs,
+VAEs, text encoders, ControlNets, GGUF files and so on — and checks each one
+against ShareSync by **filename and exact size**. Nothing is ever uploaded without
+your explicit consent, and nothing is submitted while a referenced model is missing.
+
+Depending on what the check finds:
+
+- **Everything present** — the render submits immediately; the check adds well
+  under a second.
+- **Missing on ShareSync but present locally** — a consent list appears in the
+  panel with each model's name, folder and size (models can be many GB, so sizes
+  matter), and three choices:
+  1. **Upload, then render** — blocks this render until the sync completes, then
+     submits.
+  2. **Upload for next time (render cancelled)** — nothing is submitted this run,
+     but the upload proceeds in the background so the model is on ShareSync for
+     the next render. A progress badge appears under the ⚡ button showing percent,
+     bytes and a rough time remaining; it survives the panel being closed and even
+     a browser tab reload (the transfer runs in the ComfyUI server process). The
+     ✕ on the badge cancels the upload. Closing ComfyUI itself stops the transfer;
+     an interrupted upload is simply re-offered on the next render.
+  3. **Cancel** — no upload, no render.
+- **Missing everywhere** (not local, not on ShareSync) — a clear error naming the
+  model; no upload can fix that, so nothing runs.
+- **Already uploading** (from an earlier "upload for next time") — the render is
+  held off until the transfer finishes; watch the badge.
+
+**Where uploads go.** Each model is uploaded to
+`{assets ShareSync path}/{model folder}/{name}` — for example, with the default
+assets path, `FLUX2\flux2-dev.safetensors` in your local `diffusion_models` folder
+lands at `/comfy-flux2-klein/models/diffusion_models/FLUX2/flux2-dev.safetensors`.
+Local subfolders are preserved, so the cloud library keeps mirroring your local
+model layout, which is exactly what the cloud ComfyUI expects.
+
+**The upload guard.** Files larger than a configurable guard (default **50 GB**)
+are never uploaded from the node; they are listed with a note to stage them via
+the ShareSync desktop app instead, or to raise the guard. This is a practicality
+limit, not a server one — ShareSync accepts files up to 2 TB, but transfers are
+not resumable, so an interrupted huge upload restarts from zero. The guard
+currently lives as `"upload_guard_gb"` in `spark_fuse_settings.json` in the
+installed node folder (`0` disables it); surfacing it in the panel UI is a
+planned follow-up.
+
+If a re-check shows a model on ShareSync with the **same name but a different
+size**, it is treated as out of date: the consent list flags it and an approved
+upload overwrites the cloud copy.
 
 ## Notes
 
