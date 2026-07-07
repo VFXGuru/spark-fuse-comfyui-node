@@ -37,14 +37,18 @@ function buildPanel() {
   });
 
   const title = el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;" },
-    el("strong", { textContent: "Render on Spark Fuse" }),
+    el("span", {},
+      el("strong", { textContent: "Render on Spark Fuse" }),
+      el("span", { id: "sf-version", style: "opacity:0.6;font-size:11px;margin-left:6px;" })),
     el("span", { textContent: "✕", style: "cursor:pointer;opacity:0.7;", onclick: () => (panel.style.display = "none") }));
 
   const skuSelect = el("select", { id: "sf-sku", style: "padding:4px;background:#2a2a2a;color:#eee;border:1px solid #555;" });
   const rateLabel = el("div", { id: "sf-rate", textContent: "", style: "font-size:12px;opacity:0.8;margin-bottom:8px;" });
   skuSelect.onchange = updateRate;
 
-  const assetsInput = el("input", { id: "sf-assets", type: "text", style: inputStyle() });
+  const assetsInput = el("input", { id: "sf-assets", type: "text", style: inputStyle(),
+    oninput: updateAssetsPreview });
+  const assetsPreview = el("div", { id: "sf-assets-preview", style: "font-size:11px;opacity:0.7;margin:-4px 0 8px;" });
   const affinitySelect = el("select", { id: "sf-affinity", style: inputStyle() });
   affinitySelect.append(el("option", { value: "preferred", textContent: "preferred" }),
                         el("option", { value: "required", textContent: "required" }));
@@ -54,7 +58,8 @@ function buildPanel() {
   const passInput = el("input", { id: "sf-pass", type: "password", placeholder: "(unchanged)", style: inputStyle() });
   const batchInput = el("input", { id: "sf-batch", type: "number", min: "1", max: "100", value: "1", style: inputStyle() });
 
-  const saveBtn = el("button", { textContent: "Save settings", style: btnStyle("#3a3a3a"), onclick: async () => { await saveSettings(); await loadSkus(); } });
+  const saveBtn = el("button", { textContent: "Save settings", style: btnStyle("#3a3a3a"),
+    onclick: async () => { try { await saveSettings(); await loadSkus(); } catch (e) { setStatus(`Could not save settings: ${e}`, "#ff8888"); } } });
   const renderBtn = el("button", { id: "sf-render", textContent: "Render on Spark Fuse", style: btnStyle("#7c5cff") + "opacity:0.5;cursor:not-allowed;", disabled: true, onclick: onRender });
 
   const addQueueBtn = el("button", { id: "sf-add-queue", textContent: "Add to queue", style: smallBtn("#3a3a3a"), onclick: addToQueue });
@@ -63,9 +68,9 @@ function buildPanel() {
   const clearQueueBtn = el("button", { id: "sf-clear-queue", textContent: "Clear", style: btnStyle("#3a3a3a"), onclick: clearQueue });
   const cancelQueueBtn = el("button", { id: "sf-cancel-queue", textContent: "Cancel queue",
     style: "width:100%;padding:8px;border:none;border-radius:4px;background:#aa3333;color:#fff;cursor:pointer;font-size:13px;margin-top:6px;display:none;", onclick: cancelQueue });
-  const queueSection = el("div", { style: "border-top:1px solid #333;margin-top:6px;padding-top:8px;" },
-    el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;" },
-       el("strong", { textContent: "Render queue", style: "font-size:13px;" }), addQueueBtn),
+  const queueSection = el("details", { style: "border-top:1px solid #333;margin-top:6px;padding-top:8px;" },
+    el("summary", { textContent: "Render queue", style: "cursor:pointer;font-size:13px;margin-bottom:4px;" }),
+    el("div", { style: "display:flex;justify-content:flex-end;margin-bottom:4px;" }, addQueueBtn),
     queueList,
     el("div", { style: "display:flex;gap:8px;" }, runQueueBtn, clearQueueBtn),
     cancelQueueBtn);
@@ -83,6 +88,7 @@ function buildPanel() {
     title,
     field("GPU", skuSelect), rateLabel,
     field("Assets ShareSync path (models)", assetsInput),
+    assetsPreview,
     field("Image affinity", affinitySelect),
     field("Batch count (images per job)", batchInput),
     el("details", {}, el("summary", { textContent: "Credentials", style: "cursor:pointer;font-size:12px;margin-bottom:6px;" }),
@@ -116,7 +122,9 @@ function setRenderEnabled(on) {
 async function loadSettings() {
   try {
     const s = await api("/settings");
+    document.getElementById("sf-version").textContent = s.version ? `v${s.version}` : "";
     document.getElementById("sf-assets").value = s.assets_share_sync_path || "";
+    updateAssetsPreview();
     document.getElementById("sf-affinity").value = s.image_affinity || "preferred";
     document.getElementById("sf-batch").value = s.batch_count || 1;
     document.getElementById("sf-host").value = s.host || "";
@@ -152,10 +160,31 @@ async function updateRate() {
   rate.textContent = data.ratePerHourUsd ? `Rate: $${data.ratePerHourUsd}/hr` : "Rate: unavailable (SKU not priced)";
 }
 
+// Mirrors the Spark Fuse API's own rejection (spark-fuse-api-v124.md:1134 in the
+// SPARK FUSE MESSENGER repo: "assetsShareSyncPath must start with '/' ...") so the
+// panel fails the same way, before submit, instead of after a 400 from the cloud.
+const ASSETS_PATH_ERROR = "assetsShareSyncPath must start with '/' — add a leading slash.";
+
+function updateAssetsPreview() {
+  const preview = document.getElementById("sf-assets-preview");
+  if (!preview) return;
+  const raw = document.getElementById("sf-assets").value.trim();
+  if (!raw) { preview.textContent = ""; return; }
+  if (!raw.startsWith("/")) {
+    preview.textContent = `⚠ ${ASSETS_PATH_ERROR}`;
+    preview.style.color = "#ffaa55";
+  } else {
+    preview.textContent = `Resolves to: ${raw}`;
+    preview.style.color = "";
+  }
+}
+
 async function saveSettings() {
+  const assetsPath = document.getElementById("sf-assets").value.trim();
+  if (assetsPath && !assetsPath.startsWith("/")) throw new Error(ASSETS_PATH_ERROR);
   const body = {
     instance_type: document.getElementById("sf-sku").value,
-    assets_share_sync_path: document.getElementById("sf-assets").value,
+    assets_share_sync_path: assetsPath,
     image_affinity: document.getElementById("sf-affinity").value,
     batch_count: parseInt(document.getElementById("sf-batch").value, 10) || 1,
     host: document.getElementById("sf-host").value,

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.1 — 2026-07-07
+
+Bridge-only fixes from external tester feedback. Messenger is unchanged.
+
+### Added
+
+- **Version indicator** in the panel title, read from the bridge's own
+  `__version__` via the existing `/settings` call — no new route.
+- **Render queue collapsed by default**, matching the Credentials section, so
+  the single "Render on Spark Fuse" button reads as the default action.
+- **Live ShareSync path preview** under the assets field, and **leading-slash
+  validation before submit**: a path missing the leading `/` is rejected in
+  the panel with the same message Spark Fuse's API returns
+  (`assetsShareSyncPath must start with '/'`), instead of failing only after
+  the render or queue has already been submitted to the cloud.
+
+### Dropped
+
+- **Save-state (unsaved-changes) check before submit** — investigated and
+  dropped. ComfyUI_frontend tracks workflow-modified state internally
+  (`ComfyWorkflow.isModified`, behind a Pinia store), but it is not reachable
+  from a legacy `scripts/app.js`-based extension without depending on
+  undocumented internals. Blocked on an upstream ComfyUI frontend API; no
+  documented, version-stable accessor exists.
+
 ## 0.2.0 — 2026-07-02
 
 Pre-render model sync: the bridge now detects the models a workflow references,

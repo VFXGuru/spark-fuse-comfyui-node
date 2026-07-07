@@ -10,7 +10,7 @@ import asyncio
 from aiohttp import web
 from server import PromptServer
 
-from . import config, jobs, model_sync, render_queue
+from . import __version__, config, jobs, model_sync, render_queue
 
 routes = PromptServer.instance.routes
 
@@ -22,7 +22,9 @@ async def _run(func):
 
 @routes.get("/spark_fuse/settings")
 async def get_settings(request):
-    return web.json_response(config.public_settings())
+    data = config.public_settings()
+    data["version"] = __version__
+    return web.json_response(data)
 
 
 @routes.post("/spark_fuse/settings")

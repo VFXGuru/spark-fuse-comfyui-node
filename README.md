@@ -85,7 +85,8 @@ your VRAM. The bridge earns its keep in three situations:
 Click the **⚡ Spark Fuse** button (top right), open **Credentials**, and set your
 host, email and password. Alternatively provide `SPARK_HOST`, `SPARK_EMAIL` and
 `SPARK_PASSWORD` in the environment. Set the **assets ShareSync path** (the folder
-that holds your model subfolders, for example `/comfy-flux2-klein/models`), choose
+that holds your model subfolders, for example `/comfy-flux2-klein/models`; it must
+start with `/` — the panel flags this live and blocks Save/Render otherwise), choose
 a GPU, optionally set a **batch count** (see below), then **Save settings**. The
 runner image tracks the published `:latest` build, so image updates reach you
 automatically; image affinity still resolves it to a specific digest at submit time.
@@ -110,7 +111,8 @@ overwrite earlier renders. The count is limited to between 1 and 100.
 
 ## Render queue
 
-The queue runs several different workflows back to back on one warm instance.
+Collapsed by default in the panel — click to expand. The queue runs several
+different workflows back to back on one warm instance.
 Spark Fuse pre-warms a single instance, every queued job runs on it with no cold
 start or image pull between jobs, and the instance is released when the queue ends.
 
