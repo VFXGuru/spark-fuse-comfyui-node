@@ -57,6 +57,7 @@ function buildPanel() {
   const emailInput = el("input", { id: "sf-email", type: "text", style: inputStyle() });
   const passInput = el("input", { id: "sf-pass", type: "password", placeholder: "(unchanged)", style: inputStyle() });
   const batchInput = el("input", { id: "sf-batch", type: "number", min: "1", max: "100", value: "1", style: inputStyle() });
+  const guardInput = el("input", { id: "sf-guard", type: "number", min: "1", value: "50", style: inputStyle() });
 
   const saveBtn = el("button", { textContent: "Save settings", style: btnStyle("#3a3a3a"),
     onclick: async () => { try { await saveSettings(); await loadSkus(); } catch (e) { setStatus(`Could not save settings: ${e}`, "#ff8888"); } } });
@@ -92,7 +93,8 @@ function buildPanel() {
     field("Image affinity", affinitySelect),
     field("Batch count (images per job)", batchInput),
     el("details", {}, el("summary", { textContent: "Credentials", style: "cursor:pointer;font-size:12px;margin-bottom:6px;" }),
-       field("Host", hostInput), field("Email", emailInput), field("Password", passInput)),
+       field("Host", hostInput), field("Email", emailInput), field("Password", passInput),
+       field("Upload guard (GB, max single-file auto-upload)", guardInput)),
     el("div", { style: "display:flex;gap:8px;margin:6px 0 10px;" }, saveBtn, renderBtn),
     queueSection,
     consentSection,
@@ -127,6 +129,7 @@ async function loadSettings() {
     updateAssetsPreview();
     document.getElementById("sf-affinity").value = s.image_affinity || "preferred";
     document.getElementById("sf-batch").value = s.batch_count || 1;
+    document.getElementById("sf-guard").value = s.upload_guard_gb || 50;
     document.getElementById("sf-host").value = s.host || "";
     document.getElementById("sf-email").value = s.email || "";
     if (s.password_set) document.getElementById("sf-pass").placeholder = "(stored — leave blank to keep)";
@@ -182,11 +185,17 @@ function updateAssetsPreview() {
 async function saveSettings() {
   const assetsPath = document.getElementById("sf-assets").value.trim();
   if (assetsPath && !assetsPath.startsWith("/")) throw new Error(ASSETS_PATH_ERROR);
+  // An empty or invalid entry falls back to the 50 GB default rather than
+  // erroring, since this field is easy to clear by accident.
+  const guardRaw = parseInt(document.getElementById("sf-guard").value, 10);
+  const uploadGuardGb = (Number.isFinite(guardRaw) && guardRaw > 0) ? guardRaw : 50;
+  document.getElementById("sf-guard").value = uploadGuardGb;
   const body = {
     instance_type: document.getElementById("sf-sku").value,
     assets_share_sync_path: assetsPath,
     image_affinity: document.getElementById("sf-affinity").value,
     batch_count: parseInt(document.getElementById("sf-batch").value, 10) || 1,
+    upload_guard_gb: uploadGuardGb,
     host: document.getElementById("sf-host").value,
     email: document.getElementById("sf-email").value,
   };

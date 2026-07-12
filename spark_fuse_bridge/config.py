@@ -1,19 +1,28 @@
 """Settings and Spark Fuse client construction for the bridge.
 
-Settings live in spark_fuse_settings.json next to this package (gitignored, since
-it can hold credentials). Credentials fall back to the SPARK_HOST / SPARK_EMAIL /
+Settings live outside the installed node folder, under ComfyUI's per-installation
+user directory (see _settings_path), so they survive a Manager uninstall or a
+delete-and-reinstall. Credentials fall back to the SPARK_HOST / SPARK_EMAIL /
 SPARK_PASSWORD environment variables when not set in the panel.
+
+Known limitation: the settings file still stores email and password in plain
+text. The new location is not exposed over HTTP, which is no worse than the
+old in-folder location, but real encryption at rest is a future improvement.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 from spark_fuse import SparkFuseClient
 
 _ROOT = Path(__file__).resolve().parent.parent
-SETTINGS_PATH = _ROOT / "spark_fuse_settings.json"
+_LEGACY_SETTINGS_PATH = _ROOT / "spark_fuse_settings.json"
+
+# Cache so _settings_path() resolves (and migrates) only once per process.
+_settings_path_cache: Path | None = None
 
 # The production API host is effectively constant for now; default to it so users
 # only need to supply their email and password.
@@ -46,15 +55,67 @@ DEFAULTS = {
 PUBLIC_KEYS = [
     "image", "instance_type", "assets_share_sync_path",
     "assets_share_sync_space_name", "model_base_dir", "image_affinity",
-    "batch_count", "host", "email",
+    "batch_count", "host", "email", "upload_guard_gb",
 ]
+
+
+def _settings_path() -> Path:
+    """Resolve where the settings file lives, migrating a legacy copy on first use.
+
+    Settings used to live at _LEGACY_SETTINGS_PATH, inside the installed node
+    folder. That location does not survive a Manager uninstall or a
+    delete-and-reinstall, so settings now live under ComfyUI's
+    per-installation user directory instead, which no node install, update or
+    uninstall path touches.
+    """
+    global _settings_path_cache
+    if _settings_path_cache is not None:
+        return _settings_path_cache
+
+    import folder_paths  # ComfyUI-provided; available at runtime
+
+    if hasattr(folder_paths, "get_system_user_directory"):
+        # System User directory: internal-only, never exposed through
+        # ComfyUI's HTTP /userdata endpoints. Mirrors ComfyUI-Manager's own
+        # move from user/default/ComfyUI-Manager to user/__manager.
+        settings_dir = Path(folder_paths.get_system_user_directory("spark_fuse_bridge"))
+    else:
+        # Older ComfyUI without the System User Protection API: fall back to
+        # the plain per-user directory, matching Manager's legacy path
+        # convention (user/default/<name>).
+        settings_dir = Path(folder_paths.get_user_directory()) / "default" / "spark_fuse_bridge"
+
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    new_path = settings_dir / "spark_fuse_settings.json"
+    _migrate_legacy_settings(new_path)
+
+    _settings_path_cache = new_path
+    return new_path
+
+
+def _migrate_legacy_settings(new_path: Path) -> None:
+    """Move a pre-0.2.2 in-folder settings file into place, once.
+
+    If the new location already has a file, it wins and the legacy file is
+    left untouched. Otherwise the legacy file is copied to the new location
+    and renamed aside (never deleted), so nothing is lost if this goes wrong.
+    """
+    if new_path.is_file() or not _LEGACY_SETTINGS_PATH.is_file():
+        return
+    try:
+        shutil.copyfile(_LEGACY_SETTINGS_PATH, new_path)
+        backup_path = _LEGACY_SETTINGS_PATH.with_name(_LEGACY_SETTINGS_PATH.name + ".migrated")
+        _LEGACY_SETTINGS_PATH.rename(backup_path)
+    except OSError:
+        pass
 
 
 def load_settings() -> dict:
     data = dict(DEFAULTS)
-    if SETTINGS_PATH.is_file():
+    settings_path = _settings_path()
+    if settings_path.is_file():
         try:
-            data.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+            data.update(json.loads(settings_path.read_text(encoding="utf-8-sig")))
         except (OSError, ValueError):
             pass
     # image/command are node-version constants; never honour a stale saved value.
@@ -68,7 +129,7 @@ def save_settings(values: dict) -> dict:
     for key in DEFAULTS:
         if key in values and values[key] is not None:
             current[key] = values[key]
-    SETTINGS_PATH.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    _settings_path().write_text(json.dumps(current, indent=2), encoding="utf-8")
     return current
 
 

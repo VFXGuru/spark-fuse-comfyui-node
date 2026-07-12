@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.2 — 2026-07-12
+
+Bridge-only fixes from a partner tester report: a Manager update wiped saved
+settings and left no way back in. Messenger is unchanged.
+
+### Fixed
+
+- **Settings now survive an uninstall or a delete-and-reinstall.** They used
+  to live inside the installed node folder, which some install paths (a
+  Registry install via `comfy node install`, or Manager's own Uninstall)
+  remove outright. They now live under ComfyUI's per-installation user
+  directory (`folder_paths.get_system_user_directory`, with a fallback for
+  older ComfyUI), which no install, update or uninstall path touches. An
+  existing settings file is migrated automatically on first run; the old copy
+  is renamed aside as `spark_fuse_settings.json.migrated`, never deleted.
+
+### Added
+
+- **Upload guard is now editable in the panel**, under Credentials, defaulting
+  to 50 GB. Previously it could only be changed by hand-editing the settings
+  file, which testers could not find.
+
+### Changed
+
+- **The published archive no longer ships `scripts/` or `tests/`** (added a
+  `.comfyignore`). `docs/` still ships, so the manual PDF is unaffected.
+
 ## 0.2.1 — 2026-07-07
 
 Bridge-only fixes from external tester feedback. Messenger is unchanged.
