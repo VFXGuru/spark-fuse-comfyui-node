@@ -96,9 +96,10 @@ function buildPanel() {
        field("Host", hostInput), field("Email", emailInput), field("Password", passInput),
        field("Upload guard (GB, max single-file auto-upload)", guardInput)),
     el("div", { style: "display:flex;gap:8px;margin:6px 0 10px;" }, saveBtn, renderBtn),
+    status,
     queueSection,
     consentSection,
-    status, log, preview,
+    log, preview,
   );
   document.body.append(panel);
   return panel;

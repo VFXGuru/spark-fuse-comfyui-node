@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.3 — 2026-07-18
+
+Bridge-only UI fixes from partner feedback. Messenger is unchanged.
+
+### Fixed
+
+- **The GPU dropdown no longer lists non-GPU SKUs.** `c3.*`, `r6a.*`, `m6a.*`
+  and any other SKU without a GPU are filtered out server-side, keyed on the
+  `gpuType` field the API already returns; only instances that can actually
+  run a render are shown.
+- **GPU dropdown ordering is now sensible.** Entries are grouped by family
+  (`g6.*`, `g7e.*`, ...) and ordered by size within each family, so
+  `g6.xlarge` sorts back in with the rest of the `g6` family instead of
+  landing wherever the API's allow-list happened to place it. Sorting is
+  computed from the instance type string itself, not a hardcoded family
+  list, so new families and sizes sort correctly automatically.
+- **"Settings saved." is now visible.** The confirmation was already firing
+  on a successful save, but the status line rendered near the bottom of the
+  panel, below the fold. It now sits directly under the Save/Render button
+  row, where the click happened.
+
 ## 0.2.2 — 2026-07-12
 
 Bridge-only fixes from a partner tester report: a Manager update wiped saved
