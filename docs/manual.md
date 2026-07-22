@@ -1,6 +1,6 @@
 # Spark Fuse Cloud GPU Bridge — User Manual
 
-**Version 0.2.0 · July 2026**
+**Version 0.2.4 · July 2026**
 
 The Spark Fuse Cloud GPU Bridge is a ComfyUI extension that renders your current
 workflow on a Spark Fuse cloud GPU and brings the finished images straight back
@@ -43,7 +43,11 @@ that **before** submitting and walks you through syncing them (section 7).
 
 ## 4. Install
 
-1. Clone the extension into ComfyUI's `custom_nodes` folder so it sits at
+1. Install the extension into ComfyUI's `custom_nodes` folder.
+
+   Via ComfyUI-Manager (easiest): search "Spark Fuse Cloud GPU Bridge" and install.
+
+   Or clone it directly so it sits at
    `ComfyUI/custom_nodes/spark-fuse-comfyui-node`:
 
    ```
@@ -78,14 +82,18 @@ environment variables). Then:
 
 - **Assets ShareSync path**: the ShareSync folder that holds your model
   subfolders, for example `/comfy-flux2-klein/models`. The cloud mounts this at
-  `/assets`.
-- **GPU**: pick an instance type; the hourly rate shows beside it.
+  `/assets`. The panel previews the resolved path live as you type and
+  validates the leading slash before submit.
+- **GPU**: pick an instance type; the hourly rate shows beside it. The list
+  shows GPU instances only, grouped by family and size.
 - **Image affinity**: `required` reports whether repeated runs hit the image
   cache; `preferred` does the same placement silently.
 - **Batch count**: how many images one job renders (section 6.1).
 
-Click **Save settings**. Settings persist in `spark_fuse_settings.json` next to
-the extension (gitignored; prefer environment variables on shared machines).
+Click **Save settings**. Settings persist in `spark_fuse_settings.json` under
+ComfyUI's user directory, not inside the extension folder, so they survive a
+node update, uninstall or reinstall; prefer environment variables on shared
+machines.
 
 ## 6. Rendering
 
@@ -181,9 +189,10 @@ ShareSync desktop app instead, or to raise the guard if you have the bandwidth.
 
 This is a practicality limit, not a server one: ShareSync accepts files up to
 2 TB, but transfers are not resumable, so an interrupted huge upload restarts
-from zero. The guard currently lives in `spark_fuse_settings.json` in the
-installed node folder as `"upload_guard_gb"` (`0` disables it); surfacing it in
-the panel UI is a planned follow-up.
+from zero. The guard is editable in the panel under **Credentials** as
+"Upload guard (GB, max single-file auto-upload)", and lives in
+`spark_fuse_settings.json` under ComfyUI's user directory as
+`"upload_guard_gb"` (`0` disables it).
 
 ### 7.5 Overwrites
 
@@ -193,7 +202,8 @@ copy") and an approved upload replaces it.
 
 ## 8. Settings reference
 
-`spark_fuse_settings.json` (next to the extension, created by **Save settings**):
+`spark_fuse_settings.json` (under ComfyUI's user directory, created by **Save
+settings**; survives node updates, uninstall and reinstall):
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -222,8 +232,11 @@ copy") and an approved upload replaces it.
 - **A job fails with "not found on the cloud."** The model is missing under
   `/assets` at the expected path. Check that your ShareSync assets folder
   mirrors your local model folders, or let the model sync stage it for you.
-- **No warm-pool capacity (queue).** With `session_affinity` preferred the queue
-  falls back to independent submits; with `required` it aborts. Retry later.
+- **No warm-pool capacity (queue).** Governed by `session_affinity`, a setting
+  distinct from **Image affinity** above and not currently exposed in the
+  panel (set it by hand in `spark_fuse_settings.json` if needed). It defaults
+  to `preferred`, which falls back to independent submits; `required` aborts
+  the queue instead. Retry later.
 - **The ⚡ button or panel does not appear.** Hard-refresh the browser tab
   (Ctrl+F5) and check the ComfyUI log and browser console.
 

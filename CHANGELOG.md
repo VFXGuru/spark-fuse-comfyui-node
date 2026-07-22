@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.4 — 2026-07-22
+
+Bridge-only discoverability and documentation pass. Messenger is unchanged.
+
+### Changed
+
+- **The collapsed "Render queue" panel header now reads "Render queue — queue
+  several workflows to run back to back"**, so the multi-workflow queue is
+  discoverable and clearly distinct from the single-workflow batch count.
+
+### Docs
+
+- Brought the user manual up to date with the 0.2.1 to 0.2.3 UI changes:
+  settings now live in ComfyUI's user directory and survive updates and
+  reinstalls; the upload guard is editable in the panel; the GPU dropdown
+  shows GPU instances only, grouped by family and size; the ShareSync path is
+  previewed and validated in the panel; added ComfyUI-Manager as the primary
+  install method; and clarified that `session_affinity` is a separate,
+  panel-unexposed setting from image affinity.
+- Regenerated the manual PDF.
+
 ## 0.2.3 — 2026-07-18
 
 Bridge-only UI fixes from partner feedback. Messenger is unchanged.
