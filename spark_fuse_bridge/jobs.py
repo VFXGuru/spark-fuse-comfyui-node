@@ -18,6 +18,7 @@ import traceback
 from pathlib import Path
 from typing import NamedTuple
 
+from spark_fuse.errors import ShareSyncError
 from spark_fuse.models import LogEvent, QueueStatusEvent
 
 from .config import load_settings, make_client
@@ -87,6 +88,16 @@ def _build_env(settings: dict, batch_count: int) -> dict:
         "MODEL_BASE_DIR": settings["model_base_dir"],
         "BATCH_COUNT": str(batch_count),
     }
+
+
+def _build_chunk_env(settings: dict) -> dict:
+    """Env for a manifest-mode (queue chunk) job. batch_count travels per entry
+    inside the manifest itself; the runner's manifest branch never reads
+    BATCH_COUNT (spark_fuse_run.py's run_manifest() takes it from the parsed
+    JSON, only the single-workflow fallback path reads the env var), so it is
+    intentionally omitted here rather than sent as a value nothing will honour.
+    """
+    return {"MODEL_BASE_DIR": settings["model_base_dir"]}
 
 
 # Add video/audio loaders here as one-line entries, e.g. "VHS_LoadVideo": ["video"].
@@ -177,6 +188,59 @@ def _stage_input_files(workflow: dict, staging_dir: Path) -> None:
     _log.info("staged %d input file(s)", staged)
 
 
+def _stage_chunk_input_files(entries: list[dict], staging_dir: Path, log=None) -> None:
+    """Merge every entry's referenced input files into one staging pass for a
+    queue chunk's single shared /input mount.
+
+    A dest_rel referenced by more than one workflow in the chunk collapses to
+    one copy: ComfyUI has one input directory (not one per workflow), so the
+    same filename can only resolve to one physical file at the single moment
+    this whole chunk is staged — restaging it twice would just copy the same
+    source over itself. That said, this does remove a property the old
+    one-job-per-item queue had: each item used to stage lazily, right before
+    its own submission, so swapping a same-named input file between queue
+    items (deliberately or not) would land the *new* file on the *later*
+    item. Staging a whole chunk up front means every workflow in it now sees
+    whatever was on disk at chunk-submit time, whichever one referenced it
+    first or last. Not treated as an error — reusing one input image (e.g. a
+    ControlNet pose) across every item in a batch is a normal, desirable
+    pattern this cannot tell apart from an accidental collision — but always
+    logged so it is visible.
+    """
+    if log is None:
+        log = lambda _m: None  # noqa: E731
+    import folder_paths  # ComfyUI-provided; available at runtime
+    input_dir = Path(folder_paths.get_input_directory())
+
+    planned: dict[str, _StagedFile] = {}
+    referenced_by: dict[str, list[int]] = {}
+    for idx, entry in enumerate(entries, start=1):
+        for sf in _collect_input_files(entry["workflow"], input_dir):
+            planned[sf.dest_rel] = sf
+            referenced_by.setdefault(sf.dest_rel, []).append(idx)
+
+    for dest_rel, item_numbers in referenced_by.items():
+        if len(item_numbers) > 1:
+            positions = ", ".join(str(n) for n in item_numbers)
+            log(f"[bridge] note: {len(item_numbers)} workflows in this batch "
+                f"(items {positions}) share input file {dest_rel!r}; each gets "
+                "the same content")
+
+    staged = 0
+    for sf in planned.values():
+        if not sf.src.exists():
+            _log.warning(
+                "node %s (%s) field %r: %r not found locally; skipping",
+                sf.node_id, sf.class_type, sf.field, str(sf.src),
+            )
+            continue
+        dest = staging_dir / sf.dest_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sf.src, dest)
+        staged += 1
+    _log.info("staged %d input file(s) for %d-workflow batch", staged, len(entries))
+
+
 def _submit_job(client, api_prompt: dict, *, instance_type, settings, batch_count,
                 instance_handle: str | None = None):
     """Submit one workflow job and stage its workflow.json; return CreateJobResponse.
@@ -203,6 +267,41 @@ def _submit_job(client, api_prompt: dict, *, instance_type, settings, batch_coun
     tmp = Path(tempfile.mkdtemp(prefix="spark-fuse-wf-"))
     (tmp / "workflow.json").write_text(json.dumps(api_prompt), encoding="utf-8")
     _stage_input_files(api_prompt, tmp)
+    client.upload_input(tmp, resp.input.upload_url)
+    return resp
+
+
+def _submit_chunk_job(client, entries: list[dict], *, instance_type, settings,
+                      instance_handle: str, log=None):
+    """Submit one manifest-mode job covering up to queue_chunk_size() workflows,
+    routed onto the prepared session via instance_handle. Mirrors _submit_job's
+    auto-prepare push, but writes /input/spark_fuse_job.json (the runner's
+    multi-workflow contract, already live in the published image) instead of a
+    single workflow.json, and stages every entry's referenced input files in
+    one merged pass (see _stage_chunk_input_files) rather than one per job.
+
+    entries: [{"workflow": api-format graph, "batch_count": int}, ...], already
+    normalised (jobs._normalize_model_paths applied) by the caller.
+    """
+    resp = client.submit(
+        image=settings["image"],
+        command=settings["command"],
+        instance_type=instance_type or settings["instance_type"],
+        env=_build_chunk_env(settings),
+        input_push_mode="auto-prepare",
+        assets_share_sync_path=settings.get("assets_share_sync_path") or None,
+        assets_share_sync_space_name=settings.get("assets_share_sync_space_name") or None,
+        image_affinity=settings.get("image_affinity") or None,
+        instance_handle=instance_handle,
+    )
+    if not (resp.input and resp.input.upload_url):
+        raise RuntimeError("No auto-prepare upload URL returned by Spark Fuse.")
+    manifest = {"workflows": [
+        {"workflow": e["workflow"], "batch_count": e["batch_count"]} for e in entries
+    ]}
+    tmp = Path(tempfile.mkdtemp(prefix="spark-fuse-chunk-"))
+    (tmp / "spark_fuse_job.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _stage_chunk_input_files(entries, tmp, log=log)
     client.upload_input(tmp, resp.input.upload_url)
     return resp
 
@@ -318,6 +417,69 @@ def _download_images(client, job, log=None) -> list[str]:
         log(f"[bridge] saved {len(saved)} image(s) to ComfyUI output: {', '.join(saved)}")
     else:
         log(f"[bridge] succeeded but found no image in {len(paths)} output file(s)")
+    return saved
+
+
+def _resolve_chunk_output_base_url(client, job, log=None) -> str | None:
+    """Poll briefly for a chunk job's output.share_sync_base_url to populate (it
+    can lag terminal by a few seconds — same lag _download_images already
+    retries for on the single-render path). Kept separate from that function,
+    rather than shared, so the single-render path is never touched by anything
+    queue-related.
+    """
+    if log is None:
+        log = lambda _m: None  # noqa: E731
+    base_url = job.output.share_sync_base_url if job.output else None
+    for _ in range(6):
+        if base_url:
+            return base_url
+        time.sleep(2)
+        job = client.get_job(job.id)
+        base_url = job.output.share_sync_base_url if job.output else None
+    log("[bridge] batch finished but no output path was returned after retries")
+    return None
+
+
+def _download_chunk_item_images(client, job, base_url: str, local_idx: int, log=None) -> list[str]:
+    """Download one manifest entry's outputs from the job's /output/wf_{local_idx:02d}/
+    subfolder, moving them into ComfyUI's output dir under fresh sequential names
+    (same _unique_output_name convention as the single-render/fallback path).
+
+    Uses the existing, unmodified client.download_outputs(), pointed directly at
+    the subfolder's URL instead of the job's output root — that single existing
+    method already recurses into subfolders and handles same-basename collisions,
+    it just flattens everything by basename with no per-subfolder attribution, so
+    calling it once per wf_NN/ (rather than once on the job root) is what gives
+    per-item isolation, with no messenger changes needed.
+
+    Returns [], not an error, when the subfolder was never created — an entry
+    that failed with zero output does not get an empty wf_NN/ folder (see the
+    runner's run_manifest()), so PROPFINDing it 404s; that is expected here,
+    not a failure of the download step itself.
+    """
+    if log is None:
+        log = lambda _m: None  # noqa: E731
+    subfolder_url = f"{base_url.rstrip('/')}/wf_{local_idx:02d}/"
+    import folder_paths  # ComfyUI-provided; available at runtime
+    out_dir = Path(folder_paths.get_output_directory())
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dl_dir = Path(tempfile.mkdtemp(prefix="spark-fuse-out-"))
+    try:
+        try:
+            paths = client.download_outputs(subfolder_url, dl_dir)
+        except ShareSyncError:
+            return []
+        images = [p for p in paths
+                  if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+        saved = []
+        for p in images:
+            name = _unique_output_name(out_dir, p.name)
+            shutil.move(str(p), str(out_dir / name))
+            saved.append(name)
+    finally:
+        shutil.rmtree(dl_dir, ignore_errors=True)
+    if saved:
+        log(f"[bridge] saved {len(saved)} image(s) to ComfyUI output: {', '.join(saved)}")
     return saved
 
 

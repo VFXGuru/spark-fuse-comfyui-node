@@ -67,10 +67,12 @@ function buildPanel() {
   const queueList = el("div", { id: "sf-queue-list", style: "display:flex;flex-direction:column;gap:3px;font-size:12px;margin:4px 0;" });
   const runQueueBtn = el("button", { id: "sf-run-queue", textContent: "Run queue", style: btnStyle("#7c5cff"), onclick: runQueue });
   const clearQueueBtn = el("button", { id: "sf-clear-queue", textContent: "Clear", style: btnStyle("#3a3a3a"), onclick: clearQueue });
-  const cancelQueueBtn = el("button", { id: "sf-cancel-queue", textContent: "Cancel queue",
+  const cancelQueueBtn = el("button", { id: "sf-cancel-queue", textContent: "Cancel queue (finishes current batch)",
     style: "width:100%;padding:8px;border:none;border-radius:4px;background:#aa3333;color:#fff;cursor:pointer;font-size:13px;margin-top:6px;display:none;", onclick: cancelQueue });
   const queueSection = el("details", { style: "border-top:1px solid #333;margin-top:6px;padding-top:8px;" },
     el("summary", { textContent: "Render queue — queue several workflows to run back to back", style: "cursor:pointer;font-size:13px;margin-bottom:4px;" }),
+    el("div", { textContent: "Long queues run in batches of up to 10 workflows per job.",
+                style: "font-size:11px;opacity:0.7;margin-bottom:4px;" }),
     el("div", { style: "display:flex;justify-content:flex-end;margin-bottom:4px;" }, addQueueBtn),
     queueList,
     el("div", { style: "display:flex;gap:8px;" }, runQueueBtn, clearQueueBtn),
@@ -673,7 +675,7 @@ function pollQueue(qid) {
 
 async function cancelQueue() {
   if (!queueId) return;
-  setStatus("Cancelling queue (current job will be stopped)...", "#ffd479");
+  setStatus("Cancelling after the current batch finishes...", "#ffd479");
   try { await api(`/queue/${queueId}/cancel`, { method: "POST" }); } catch (e) { /* best effort */ }
 }
 

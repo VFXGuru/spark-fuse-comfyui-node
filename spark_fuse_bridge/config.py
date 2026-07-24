@@ -58,6 +58,24 @@ PUBLIC_KEYS = [
     "batch_count", "host", "email", "upload_guard_gb",
 ]
 
+# Queue chunking: the maximum number of workflows per manifest job (see
+# render_queue.py and spark_fuse_run.py's multi-workflow mode). Deliberately
+# NOT in DEFAULTS/PUBLIC_KEYS, read the same way as session_affinity below:
+# save_settings() writes any key present in DEFAULTS regardless of PUBLIC_KEYS,
+# so keeping this out entirely — not just out of PUBLIC_KEYS — is the only way
+# to guarantee it can't be changed by a raw POST to /spark_fuse/settings, only
+# by hand-editing the settings file. Not a panel control: a user raising it
+# risks losing a larger batch's worth of completed work at once if its job is
+# killed.
+DEFAULT_QUEUE_CHUNK_SIZE = 10
+
+
+def queue_chunk_size(settings: dict) -> int:
+    try:
+        return max(1, int(settings.get("queue_chunk_size") or DEFAULT_QUEUE_CHUNK_SIZE))
+    except (TypeError, ValueError):
+        return DEFAULT_QUEUE_CHUNK_SIZE
+
 
 def _settings_path() -> Path:
     """Resolve where the settings file lives, migrating a legacy copy on first use.

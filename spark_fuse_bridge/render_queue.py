@@ -1,15 +1,24 @@
 """Render queue — run several workflows back to back on one warm instance.
 
-Spark Fuse API §13 lets us pre-warm an instance (POST /instances/prepare), route
-any number of sequential jobs to it by instanceHandle, then release it. This module
-does that orchestration client-side: prepare once, submit each queued workflow (each
-with its own batch count) in turn, download as each finishes, then release. When
-Spark Fuse ships native automatic queuing on a prepared session, the per-item
-submit-and-poll loop here collapses to a single load-all call; the prepare / handle
-/ release scaffolding stays the same.
+Spark Fuse API §13 lets us pre-warm an instance (POST /instances/prepare) and
+route jobs to it by instanceHandle. As of the published spark-fuse-comfyui
+image (runner commits 28c449b + dfe12e3), a single job can also carry a
+multi-workflow manifest (/input/spark_fuse_job.json) that runs several
+workflows against ONE already-warm ComfyUI process, instead of one job per
+workflow. This module chunks the queue into batches of up to
+config.queue_chunk_size() workflows, submits one manifest job per batch
+(still routed onto the same prepared instance), and derives per-workflow
+status from the runner's own "[runner] workflow M/T ..." stdout markers,
+since the platform only exposes one status per job — not one per workflow.
+
+Item indices in _QUEUES[qid]["items"] are always GLOBAL (0-based position in
+the whole queue, set once in submit_queue()). Each batch's runner reports
+LOCAL indices that restart at 1 in every job/container; batch_offset
+translates local -> global as global = batch_offset + local - 1.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 import traceback
@@ -19,20 +28,37 @@ from spark_fuse.errors import NoWarmPoolCapacityError
 from spark_fuse.models import LogEvent
 
 from . import jobs
-from .config import load_settings, make_client
+from .config import load_settings, make_client, queue_chunk_size
 
 _QUEUES: dict[str, dict] = {}
 _LOCK = threading.Lock()
 _MAX_LINES = 600
 # Session idle-hold ceiling. The clock starts at 'ready' and re-arms after each
-# job is submitted, so this is an IDLE ceiling between jobs, not a total-queue
-# ceiling. 600s (10 min) is generous for the gaps between jobs while keeping
-# billing exposure low on a crash or hard kill.
+# batch is submitted, so this is an IDLE ceiling between batches, not a total-
+# queue ceiling. 600s (10 min) is generous for the gaps between batches while
+# keeping billing exposure low on a crash or hard kill.
 _HOLD_SECONDS = 600
 _READY_TIMEOUT = 900   # max seconds to wait for the instance to report ready
-_JOB_TIMEOUT = 7200    # per-job safety ceiling
+_JOB_TIMEOUT = 7200    # per-batch safety ceiling
 _AFFINITY_RETRIES = 3  # attempts on NoWarmPoolCapacityError before fallback/abort
 _AFFINITY_RETRY_SLEEP = 5  # seconds between capacity-retry attempts
+# Grace period after a batch's job goes terminal, before gap-filling and
+# downloads: the SSE log stream can lag a terminal poll by a moment, so this
+# gives any already-printed-but-not-yet-delivered "[runner] workflow ..."
+# marker lines a chance to arrive before we conclude one was never sent.
+_TERMINAL_GRACE_SECONDS = 3
+
+# Matches the runner's exact marker strings (spark_fuse_run.py run_manifest()):
+#   [runner] workflow 2/5 started
+#   [runner] workflow 2/5 succeeded (3 file(s))
+#   [runner] workflow 2/5 failed: <reason>
+#   [runner] workflow 2/5 failed: <reason> (2 partial file(s))
+_MARKER_RE = re.compile(
+    r"^\[runner\] workflow (?P<local>\d+)/(?P<total>\d+) "
+    r"(?P<event>started|succeeded|failed)"
+    r"(?:: (?P<reason>.*?))?"
+    r"(?: \((?P<count>\d+) (?:partial )?file\(s\)\))?$"
+)
 
 
 def _clamp(value) -> int:
@@ -66,6 +92,17 @@ def _set_item(qid: str, index: int, **fields) -> None:
                 break
 
 
+def _get_item(qid: str, index: int) -> dict | None:
+    with _LOCK:
+        state = _QUEUES.get(qid)
+        if not state:
+            return None
+        for it in state["items"]:
+            if it["index"] == index:
+                return dict(it)
+    return None
+
+
 def _record_item_line(qid: str, index: int, line: str) -> None:
     with _LOCK:
         state = _QUEUES.get(qid)
@@ -97,10 +134,14 @@ def _cancelled(qid: str) -> bool:
         return bool(state and state.get("cancel"))
 
 
-def _item_active(qid: str, index: int) -> bool:
+def _set_active_job(qid: str, job_id: str | None) -> None:
+    _set(qid, active_job=job_id)
+
+
+def _job_still_active(qid: str, job_id: str) -> bool:
     with _LOCK:
         state = _QUEUES.get(qid)
-        return bool(state and state.get("active_item") == index)
+        return bool(state and state.get("active_job") == job_id)
 
 
 def get_queue_state(qid: str) -> dict | None:
@@ -120,7 +161,8 @@ def get_queue_state(qid: str) -> dict | None:
 
 def cancel_queue(qid: str) -> None:
     _set(qid, cancel=True)
-    _append(qid, "[queue] cancel requested")
+    _append(qid, "[queue] cancel requested — the current batch will finish "
+                  "and download normally; no further batches will be submitted")
 
 
 def submit_queue(items: list[dict], instance_type: str | None = None) -> str:
@@ -135,39 +177,64 @@ def submit_queue(items: list[dict], instance_type: str | None = None) -> str:
         state_items.append({"index": i, "label": label, "batch_count": batch,
                             "status": "queued", "job_id": None, "images": [], "error": None})
     _set(qid, status="preparing", instance_handle=None, image=None, error=None,
-         cancel=False, active_item=None, items=state_items)
+         cancel=False, active_job=None, items=state_items)
     threading.Thread(target=_run_queue, args=(qid, norm_items, instance_type, settings),
                      daemon=True).start()
     return qid
 
 
-def _stream_item(client, job_id: str, qid: str, index: int, label: str) -> None:
-    """Feed a running job's container log into the queue log, tagged by item. Stops
-    once this item is no longer the active one, so a stream the idle-hold keeps open
-    past terminal does not bleed into the next item."""
+def _stream_chunk(client, job_id: str, qid: str, batch_offset: int) -> None:
+    """Feed a batch job's log into the queue log, parsing the runner's
+    per-workflow markers to drive per-item status. One job's status/exit code
+    covers up to queue_chunk_size() workflows, so job state alone cannot say
+    which one is currently running or which one failed — only the runner's own
+    "[runner] workflow M/T ..." lines can. Translates each marker's local index
+    (restarts at 1 every job) to the correct global queue item via
+    batch_offset. Stops once this batch is no longer the active one, mirroring
+    the old per-item stream's past-terminal guard (idle-hold can keep the SSE
+    stream open past the job's terminal state).
+    """
+    current_local = None
     try:
         for event in client.stream_logs(job_id):
-            if not _item_active(qid, index):
+            if not _job_still_active(qid, job_id):
                 break
-            if isinstance(event, LogEvent):
-                _append(qid, f"  [{label}] {event.line}")
-                _record_item_line(qid, index, event.line)
+            if not isinstance(event, LogEvent):
+                continue
+            line = event.line
+            _append(qid, f"  {line}")
+            m = _MARKER_RE.match(line)
+            if m:
+                local = int(m.group("local"))
+                global_idx = batch_offset + local - 1
+                current_local = local
+                event_kind = m.group("event")
+                if event_kind == "started":
+                    _set_item(qid, global_idx, status="running")
+                elif event_kind == "succeeded":
+                    _set_item(qid, global_idx, status="succeeded", _has_output=True)
+                else:  # failed
+                    reason = m.group("reason") or "workflow failed"
+                    _set_item(qid, global_idx, status="failed", error=reason,
+                              _has_output=m.group("count") is not None)
+            elif current_local is not None:
+                global_idx = batch_offset + current_local - 1
+                _record_item_line(qid, global_idx, line)
     except Exception:  # noqa: BLE001 - the log feed is non-essential
         pass
 
 
-def _wait_job(client, job_id: str, qid: str, label: str):
-    """Poll a job to terminal; heartbeat; honour queue cancel. Returns the Job, or
-    None if the queue was cancelled (the job is cancelled too)."""
+def _wait_job_to_terminal(client, job_id: str, qid: str, label: str):
+    """Poll a batch's job to terminal; heartbeat. Does NOT check queue-cancel:
+    with chunking, a job now covers up to queue_chunk_size() workflows, so a
+    queue cancel must let the in-flight batch finish and download normally
+    rather than killing a job mid-batch — that would risk losing items in the
+    batch that had already succeeded, and whether a cancelled job's outputs
+    stay downloadable at all is unverified. Only the outer chunk loop in
+    _run_queue consults the cancel flag, between batches."""
     job = client.get_job(job_id)
     waited = last_beat = 0
     while not job.is_terminal:
-        if _cancelled(qid):
-            try:
-                client.cancel(job_id)
-            except Exception:  # noqa: BLE001
-                pass
-            return None
         if waited >= _JOB_TIMEOUT:
             break
         time.sleep(5)
@@ -179,9 +246,54 @@ def _wait_job(client, job_id: str, qid: str, label: str):
     return job
 
 
+def _fill_marker_gaps(qid: str, batch_offset: int, count: int, reason: str) -> None:
+    """After a batch's job goes terminal, any item in it that never received a
+    terminal marker (never started, or started but no succeeded/failed line
+    ever arrived — a dead ComfyUI process, or rarely a missed SSE line) must
+    not be left stuck at queued/running in the panel forever."""
+    for local in range(1, count + 1):
+        global_idx = batch_offset + local - 1
+        item = _get_item(qid, global_idx)
+        if item and item.get("status") not in ("succeeded", "failed", "cancelled"):
+            _set_item(qid, global_idx, status="failed", error=reason)
+
+
+def _finalize_item_errors(qid: str, batch_offset: int, count: int) -> None:
+    """Prefer the detailed ComfyUI rejection scraped from a failed item's own
+    log slice over the runner marker's plain reason text, same precedence the
+    single-job path used before chunking (_extract_validation_error(...) or
+    the runner's own message)."""
+    for local in range(1, count + 1):
+        global_idx = batch_offset + local - 1
+        item = _get_item(qid, global_idx)
+        if not item or item.get("status") != "failed":
+            continue
+        detail = jobs._extract_validation_error(_item_log(qid, global_idx))
+        if detail:
+            _set_item(qid, global_idx, error=detail)
+
+
+def _mark_batches_terminal(qid: str, start_offset: int, batches: list[list[dict]],
+                            status: str, error: str | None = None) -> int:
+    """Force every item across the given (not-yet-run) batches into a terminal
+    status, starting at start_offset's global index. Used both for a queue
+    cancel (marks not-yet-submitted batches 'cancelled') and for a bridge-side
+    submit/manifest error (marks the rest 'failed'). Returns the offset just
+    past the last batch marked, matching the running offset the caller would
+    have reached had it kept going."""
+    offset = start_offset
+    for batch in batches:
+        for local in range(1, len(batch) + 1):
+            _set_item(qid, offset + local - 1, status=status, error=error)
+        offset += len(batch)
+    return offset
+
+
 def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings: dict) -> None:
     client = make_client(settings)
     handle = None
+    chunk_size = queue_chunk_size(settings)
+    batches = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
     try:
         client.login()
         sku = instance_type or settings["instance_type"]
@@ -192,7 +304,8 @@ def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings:
         for attempt in range(1, _AFFINITY_RETRIES + 1):
             try:
                 _append(qid, f"[queue] preparing a warm {sku} instance "
-                             f"for {len(items)} job(s) (attempt {attempt}/{_AFFINITY_RETRIES})")
+                             f"for {len(items)} workflow(s) in {len(batches)} "
+                             f"batch(es) (attempt {attempt}/{_AFFINITY_RETRIES})")
                 session = client.prepare_instance(instance_type=sku, hold_seconds=_HOLD_SECONDS)
                 break
             except NoWarmPoolCapacityError:
@@ -218,6 +331,7 @@ def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings:
             waited = 0
             while not session.is_ready and not session.is_terminal:
                 if _cancelled(qid):
+                    _mark_batches_terminal(qid, 0, batches, status="cancelled")
                     _set(qid, status="cancelled")
                     return
                 if waited >= _READY_TIMEOUT:
@@ -230,55 +344,88 @@ def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings:
                     f"instance prepare {session.status}: "
                     f"{session.error_code or ''} {session.error_message or ''}".strip())
 
-            _append(qid, f"[queue] instance ready; running {len(items)} job(s) back to back")
+            _append(qid, f"[queue] instance ready; running {len(batches)} batch(es)")
         else:
-            _append(qid, f"[queue] running {len(items)} job(s) without a warm session")
+            _append(qid, f"[queue] running {len(batches)} batch(es) without a warm session")
 
         _set(qid, status="running")
 
-        for i, it in enumerate(items):
+        offset = 0
+        for batch_index, batch in enumerate(batches):
             if _cancelled(qid):
-                _set_item(qid, i, status="cancelled")
+                _mark_batches_terminal(qid, offset, batches[batch_index:], status="cancelled")
                 break
-            label, batch, prompt = it["label"], it["batch_count"], it["workflow"]
-            jobs._normalize_model_paths(prompt)
-            _set_item(qid, i, status="running")
-            _set(qid, active_item=i)
-            _append(qid, f"[queue] {label}: submitting ({batch} image(s) per job)")
+
+            count = len(batch)
+            labels = ", ".join(it["label"] for it in batch)
+            _append(qid, f"[queue] batch {batch_index + 1}/{len(batches)}: "
+                         f"submitting {count} workflow(s) ({labels})")
+            for it in batch:
+                jobs._normalize_model_paths(it["workflow"])
+            entries = [{"workflow": it["workflow"], "batch_count": it["batch_count"]} for it in batch]
+
             try:
-                resp = jobs._submit_job(client, prompt, instance_type=sku,
-                                        settings=settings, batch_count=batch,
-                                        instance_handle=handle)
+                resp = jobs._submit_chunk_job(
+                    client, entries, instance_type=sku, settings=settings,
+                    instance_handle=handle, log=lambda m: _append(qid, m))
             except Exception as exc:  # noqa: BLE001
-                _set_item(qid, i, status="failed", error=str(exc))
-                _append(qid, f"[queue] {label}: submit failed — {exc}")
-                continue
+                _append(qid, f"[queue] batch {batch_index + 1}/{len(batches)}: "
+                             f"submit failed — {exc}")
+                _mark_batches_terminal(qid, offset, batches[batch_index:],
+                                       status="failed", error=str(exc))
+                break
 
             job_id = resp.job_id
-            _set_item(qid, i, job_id=job_id)
-            threading.Thread(target=_stream_item, args=(client, job_id, qid, i, label),
+            for local in range(1, count + 1):
+                _set_item(qid, offset + local - 1, job_id=job_id)
+            _set_active_job(qid, job_id)
+            threading.Thread(target=_stream_chunk, args=(client, job_id, qid, offset),
                              daemon=True).start()
-            job = _wait_job(client, job_id, qid, label)
-            _set(qid, active_item=None)  # let this item's lingering log stream stop
+            job = _wait_job_to_terminal(client, job_id, qid, f"batch {batch_index + 1}/{len(batches)}")
 
-            if job is None:  # cancelled mid-job
-                _set_item(qid, i, status="cancelled")
+            # Grace period for trailing SSE lines before we conclude a marker
+            # was never sent, then stop this batch's stream from attributing
+            # any further (unrelated) lines.
+            time.sleep(_TERMINAL_GRACE_SECONDS)
+            _set_active_job(qid, None)
+
+            if job.exit_code == 2:
+                reason = ("internal error: Spark Fuse rejected this batch's manifest "
+                          "(exit code 2) — this indicates a bug in how the bridge built "
+                          "the request, not a workflow problem")
+                _append(qid, f"[queue] batch {batch_index + 1}/{len(batches)}: "
+                             f"{reason}. Stopping the queue.")
+                _mark_batches_terminal(qid, offset, batches[batch_index:],
+                                       status="failed", error=reason)
                 break
-            if job.status == "succeeded":
-                try:
-                    saved = jobs._download_images(client, job, log=lambda m: _append(qid, m))
-                except Exception as exc:  # noqa: BLE001 - a download failure must not sink the queue
-                    saved = []
-                    _append(qid, f"[queue] {label}: download failed — {exc}")
-                _set_item(qid, i, status="succeeded", images=saved)
-                if saved:
-                    _set(qid, image=saved[0])
-                _append(qid, f"[queue] {label}: done ({len(saved)} image(s))")
-            else:
-                detail = (jobs._extract_validation_error(_item_log(qid, i))
-                          or job.error_message or job.error_code or "job failed")
-                _set_item(qid, i, status="failed", error=detail)
-                _append(qid, f"[queue] {label}: FAILED — {detail}")
+
+            gap_reason = (
+                "batch aborted: the ComfyUI process died before this workflow could run"
+                if job.exit_code == 6 else
+                f"no result reported for this workflow before the batch ended "
+                f"(job status: {job.status!r})"
+            )
+            _fill_marker_gaps(qid, offset, count, gap_reason)
+            _finalize_item_errors(qid, offset, count)
+
+            base_url = jobs._resolve_chunk_output_base_url(
+                client, job, log=lambda m: _append(qid, m))
+            if base_url:
+                for local, it in enumerate(batch, start=1):
+                    global_idx = offset + local - 1
+                    item = _get_item(qid, global_idx)
+                    if not item or item["status"] == "cancelled":
+                        continue
+                    if item["status"] == "failed" and not item.get("_has_output"):
+                        continue  # marker already told us there is nothing to download
+                    saved = jobs._download_chunk_item_images(
+                        client, job, base_url, local, log=lambda m: _append(qid, m))
+                    if saved:
+                        _set_item(qid, global_idx, images=saved)
+                        _set(qid, image=saved[0])
+
+            _append(qid, f"[queue] batch {batch_index + 1}/{len(batches)}: done")
+            offset += count
 
         if _cancelled(qid):
             _set(qid, status="cancelled")
@@ -286,14 +433,14 @@ def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings:
             with _LOCK:
                 fails = sum(1 for it in _QUEUES[qid]["items"] if it["status"] == "failed")
             _set(qid, status=("failed" if fails else "succeeded"))
-            _append(qid, "[queue] all jobs finished" if not fails
-                    else f"[queue] finished with {fails} failed job(s)")
+            _append(qid, "[queue] all workflows finished" if not fails
+                    else f"[queue] finished with {fails} failed workflow(s)")
     except Exception as exc:  # noqa: BLE001 - any failure should surface in the UI
         _append(qid, f"[queue error] {exc}")
         _set(qid, status="failed", error=str(exc))
         traceback.print_exc()
     finally:
-        _set(qid, active_item=None)
+        _set_active_job(qid, None)
         if handle:
             try:
                 client.release_instance(handle)
