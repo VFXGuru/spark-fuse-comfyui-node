@@ -1,6 +1,6 @@
 # Spark Fuse Cloud GPU Bridge — User Manual
 
-**Version 0.2.4 · July 2026**
+**Version 0.3.0 · July 2026**
 
 The Spark Fuse Cloud GPU Bridge is a ComfyUI extension that renders your current
 workflow on a Spark Fuse cloud GPU and brings the finished images straight back
@@ -110,20 +110,33 @@ start and loads the model once, then renders that many images in sequence with
 fresh seeds. VRAM use stays at one image's worth, and every image after the first
 costs only its sampling time. All images download into ComfyUI's output folder.
 
+Each seed's **control_after_generate** setting (`fixed`, `increment`,
+`decrement`, `randomize`) is honoured on both single renders and queued items,
+matching what ComfyUI does locally: `fixed` keeps the same seed; the other
+three advance it before the next render or queue addition.
+
 ### 6.2 Render queue
 
 The queue runs several different workflows back to back on one pre-warmed
-instance, with no cold start or image pull between jobs.
+instance. Several workflows share a single job and a single ComfyUI process, so
+only the first pays the model load; each one after that costs roughly its own
+sampling time. Long queues are split into batches of up to 10 workflows per
+job, every batch still routed onto the same prepared instance.
 
 1. Open a workflow, set its batch count, click **Add to queue**. Repeat per
    workflow; each item snapshots the graph as it is when added.
 2. Click **Run queue**. The bridge checks the models of **all** queued workflows
    first (one consolidated consent if anything needs syncing), then prepares the
-   instance and runs each item in turn, downloading images as each finishes.
-3. **Cancel queue** stops after the current job and releases the instance.
+   instance and runs each batch in turn. Per-workflow status (queued, running,
+   succeeded, failed) updates live as each workflow in a batch executes; images
+   download once that batch's job finishes. A workflow that fails does not stop
+   the rest.
+3. **Cancel queue (finishes current batch)** lets the batch currently running
+   finish and download normally — nothing already rendered is lost — then stops
+   before submitting any further batches, and releases the instance.
 
 The prepared instance is billed for the whole session including the gaps between
-jobs, so run the queue back to back rather than leaving it idle.
+batches, so run the queue back to back rather than leaving it idle.
 
 ## 7. Pre-render model sync
 

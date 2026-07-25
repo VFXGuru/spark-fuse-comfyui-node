@@ -70,7 +70,7 @@ function buildPanel() {
   const cancelQueueBtn = el("button", { id: "sf-cancel-queue", textContent: "Cancel queue (finishes current batch)",
     style: "width:100%;padding:8px;border:none;border-radius:4px;background:#aa3333;color:#fff;cursor:pointer;font-size:13px;margin-top:6px;display:none;", onclick: cancelQueue });
   const queueSection = el("details", { style: "border-top:1px solid #333;margin-top:6px;padding-top:8px;" },
-    el("summary", { textContent: "Render queue — queue several workflows to run back to back", style: "cursor:pointer;font-size:13px;margin-bottom:4px;" }),
+    el("summary", { textContent: "Render queue — queue several workflows to run back to back", style: "cursor:pointer;font-size:13px;font-weight:bold;color:#7fd4ff;margin-bottom:4px;" }),
     el("div", { textContent: "Long queues run in batches of up to 10 workflows per job.",
                 style: "font-size:11px;opacity:0.7;margin-bottom:4px;" }),
     el("div", { style: "display:flex;justify-content:flex-end;margin-bottom:4px;" }, addQueueBtn),

@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.3.0 — 2026-07-25
+
+Multi-workflow render queue, backed by the already-published spark-fuse-comfyui
+image's manifest mode, plus a seed-handling fix that changes visible render
+behaviour. Messenger is unchanged.
+
+### Added
+
+- **The render queue now runs several workflows in a single job against one
+  already-warm ComfyUI process**, instead of one job per workflow. Only the
+  first workflow in a batch pays the cold start, model load and plugin
+  initialisation; each one after that costs roughly its own sampling time.
+  Measured on a queue of 3: total time fell from roughly 570s to 281s, and the
+  marginal cost of each additional queued workflow fell from about 190s to
+  about 25s. Long queues are split into batches of up to 10 workflows per job
+  (a queue of 12 ran as two batches), all still routed onto the same prepared
+  instance. Per-workflow status, output attribution and error reporting within
+  a batched job are driven by structured progress markers the runner now
+  prints per workflow; a failed workflow no longer stops the rest of the
+  batch.
+
+### Fixed
+
+- **Seed `control_after_generate` (`fixed`, `increment`, `decrement`,
+  `randomize`) is now honoured on both single renders and queued items.**
+  This changes visible render behaviour: previously the bridge captured the
+  workflow's prompt and submitted it directly, bypassing ComfyUI's own Queue
+  Prompt path entirely, so `control_after_generate` never fired and every
+  submission carried the same seed regardless of its setting. In practice
+  this meant repeated single renders produced identical images, and, more
+  seriously, queued workflows sharing one ComfyUI process could fail
+  outright, because ComfyUI's execution cache treated the repeated identical
+  prompt as already computed, executed it in 0.00 seconds, and wrote no
+  output.
+
+### Changed
+
+- **Cancel queue no longer kills the running job.** It now lets the batch
+  already in flight finish and download normally, so nothing already
+  rendered is lost, and only skips batches that have not been submitted yet.
+  The button is relabelled "Cancel queue (finishes current batch)" to say so.
+- **The collapsed "Render queue" panel header is now bold and light blue**,
+  so the multi-workflow queue reads as a distinct, discoverable feature
+  rather than blending into the rest of the panel.
+
+### Docs
+
+- Rewrote manual section 6.2 (Render queue) for the batched, single-process
+  queue model, and added a short note on `control_after_generate` alongside
+  the batch-render section.
+- Regenerated the manual PDF.
+
 ## 0.2.4 — 2026-07-22
 
 Bridge-only discoverability and documentation pass. Messenger is unchanged.
