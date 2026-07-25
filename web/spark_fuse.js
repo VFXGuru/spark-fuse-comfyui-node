@@ -208,6 +208,83 @@ async function saveSettings() {
   setStatus("Settings saved.", "#88ff88");
 }
 
+// ---- Seed control_after_generate ----------------------------------------
+// The bridge calls app.graphToPrompt() and submits directly, bypassing
+// ComfyUI's own Queue Prompt path — so control_after_generate never fires
+// and every submission carries the same seed. This mimics ComfyUI's own
+// order of operations: the prompt is captured first with the CURRENT seed
+// (this submission is unaffected), then the widget is advanced so the NEXT
+// submission differs.
+//
+// Seed widgets are identified by an immediately adjacent control_after_
+// generate widget (widgets[i+1].name === "control_after_generate"), not a
+// name whitelist, so a custom loader using a different input name is still
+// covered. Confirmed live: the control widget's value is one of fixed /
+// increment / decrement / randomize, and the seed widget's own
+// options.{min,max} carry the true bounds (max observed as
+// 18446744073709552000 — a float above Number.MAX_SAFE_INTEGER, so
+// randomising up to it verbatim would risk an imprecise, possibly
+// exponential-notation value; the effective upper bound is clamped to
+// Number.MAX_SAFE_INTEGER and every generated value is verified with
+// Number.isSafeInteger() before being assigned).
+//
+// Subgraphs: confirmed live that a promoted seed widget on a subgraph
+// wrapper node and the inner KSampler widget it is promoted from are
+// linked — only one seed entry appears in the flattened prompt
+// ("<wrapperId>:<innerId>"), not two. A promoted widget lives in the
+// wrapper node's own .widgets array, so walking app.graph._nodes at the
+// top level only already reaches it — no separate recursion into
+// node.subgraph._nodes is done here, both because it is unnecessary for a
+// promoted+linked widget and because, without live proof the two are
+// always the exact same underlying reference, recursing in as well would
+// risk advancing one linked seed twice with two different values (exactly
+// what must not happen). The one gap this leaves: a seed widget that was
+// never promoted out of a subgraph at all (no wrapper-level representation)
+// is not reachable this way and will not be advanced. See the commit
+// report for why this trade-off was chosen over risking a double-advance.
+
+function advanceSeeds() {
+  const nodes = app.graph?._nodes || [];
+  const counts = { randomize: 0, increment: 0, decrement: 0 };
+  for (const node of nodes) {
+    const widgets = node.widgets;
+    if (!Array.isArray(widgets)) continue;
+    for (let i = 0; i < widgets.length - 1; i++) {
+      const w = widgets[i];
+      const control = widgets[i + 1];
+      if (!control || control.name !== "control_after_generate") continue;
+      if (typeof w.value !== "number") continue;
+      const mode = control.value;
+      if (mode === "fixed") continue;
+      const lower = Number.isFinite(w.options?.min) ? w.options.min : 0;
+      const upper = Math.min(
+        Number.isFinite(w.options?.max) ? w.options.max : Number.MAX_SAFE_INTEGER,
+        Number.MAX_SAFE_INTEGER);
+      let next;
+      if (mode === "randomize") {
+        next = Math.floor(Math.random() * (upper - lower + 1)) + lower;
+      } else if (mode === "increment") {
+        next = Math.min(w.value + 1, upper);
+      } else if (mode === "decrement") {
+        next = Math.max(w.value - 1, lower);
+      } else {
+        continue; // unrecognised control mode; never guess, leave it untouched
+      }
+      if (!Number.isSafeInteger(next)) continue;
+      w.value = next;
+      counts[mode] = (counts[mode] || 0) + 1;
+    }
+  }
+  return counts;
+}
+
+function logSeedAdvance(counts) {
+  const parts = Object.entries(counts).filter(([, n]) => n).map(([mode, n]) => `${n} ${mode}`);
+  if (!parts.length) return;
+  const log = document.getElementById("sf-log");
+  if (log) log.textContent += (log.textContent ? "\n" : "") + `[bridge] seeds advanced: ${parts.join(", ")}`;
+}
+
 async function onRender() {
   if (pollTimer) clearInterval(pollTimer);
   const log = document.getElementById("sf-log");
@@ -225,6 +302,7 @@ async function onRender() {
     await saveSettings();
     const prompt = await app.graphToPrompt();
     const workflow = prompt.output;
+    logSeedAdvance(advanceSeeds());
     await modelGate([workflow], () => submitRender(workflow, sku));
   } catch (e) {
     setStatus(`Error: ${e}`, "#ff8888");
@@ -565,6 +643,7 @@ async function addToQueue() {
   if (queueRunning) return;
   try {
     const prompt = await app.graphToPrompt();
+    logSeedAdvance(advanceSeeds());
     const batch = parseInt(document.getElementById("sf-batch").value, 10) || 1;
     queueItems.push({ workflow: prompt.output, batch_count: batch, label: `Job ${queueItems.length + 1}`, status: "queued" });
     renderQueueList();
