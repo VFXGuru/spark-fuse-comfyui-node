@@ -216,12 +216,28 @@ async function saveSettings() {
 // (this submission is unaffected), then the widget is advanced so the NEXT
 // submission differs.
 //
-// Seed widgets are identified by an immediately adjacent control_after_
-// generate widget (widgets[i+1].name === "control_after_generate"), not a
-// name whitelist, so a custom loader using a different input name is still
-// covered. Confirmed live: the control widget's value is one of fixed /
-// increment / decrement / randomize, and the seed widget's own
-// options.{min,max} carry the true bounds (max observed as
+// Seed widgets are identified by ComfyUI's own association — a widget whose
+// .linkedWidgets includes the node's control_after_generate widget — not a
+// name whitelist and NOT adjacency in the widgets array. Adjacency (widgets[i
+// +1].name === "control_after_generate") was tried first and is wrong: a
+// promoted subgraph widget's control_after_generate can sit anywhere later
+// in the node's widget list (confirmed live on a promoted node, order text,
+// width, height, seed, steps, unet_name, clip_name, vae_name,
+// control_after_generate — seed at index 3, the control at index 8, eight
+// widgets apart), so adjacency silently found nothing and never advanced
+// that seed at all, while ComfyUI's own Run button did advance it — proof
+// the pairing exists and only the discovery method was wrong. linkedWidgets
+// is order-independent and was confirmed live on the same seed widget
+// ({ i: 3, name: "seed", type: "number", linked: ["control_after_generate"] }
+// in a summarised console dump); each entry is resolved by name against the
+// node's own widget list below in case linkedWidgets carries plain name
+// strings rather than widget references, since that summarised dump can't
+// distinguish the two on its own. No adjacency fallback: every case seen so
+// far, native and promoted, carries linkedWidgets, and keeping a second
+// discovery path around risks matching the same seed via both and advancing
+// it twice with two different values. Confirmed live: the control widget's
+// value is one of fixed / increment / decrement / randomize, and the seed
+// widget's own options.{min,max} carry the true bounds (max observed as
 // 18446744073709552000 — a float above Number.MAX_SAFE_INTEGER, so
 // randomising up to it verbatim would risk an imprecise, possibly
 // exponential-notation value; the effective upper bound is clamped to
@@ -243,17 +259,31 @@ async function saveSettings() {
 // is not reachable this way and will not be advanced. See the commit
 // report for why this trade-off was chosen over risking a double-advance.
 
+function findLinkedControl(widget, widgets) {
+  const linked = widget.linkedWidgets;
+  if (!Array.isArray(linked)) return null;
+  for (const entry of linked) {
+    if (entry && typeof entry === "object" && entry.name === "control_after_generate") {
+      return entry;
+    }
+    if (typeof entry === "string" && entry === "control_after_generate") {
+      const found = widgets.find((w2) => w2.name === "control_after_generate");
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function advanceSeeds() {
   const nodes = app.graph?._nodes || [];
   const counts = { randomize: 0, increment: 0, decrement: 0 };
   for (const node of nodes) {
     const widgets = node.widgets;
     if (!Array.isArray(widgets)) continue;
-    for (let i = 0; i < widgets.length - 1; i++) {
-      const w = widgets[i];
-      const control = widgets[i + 1];
-      if (!control || control.name !== "control_after_generate") continue;
+    for (const w of widgets) {
       if (typeof w.value !== "number") continue;
+      const control = findLinkedControl(w, widgets);
+      if (!control) continue;
       const mode = control.value;
       if (mode === "fixed") continue;
       const lower = Number.isFinite(w.options?.min) ? w.options.min : 0;
