@@ -47,6 +47,12 @@ _AFFINITY_RETRY_SLEEP = 5  # seconds between capacity-retry attempts
 # gives any already-printed-but-not-yet-delivered "[runner] workflow ..."
 # marker lines a chance to arrive before we conclude one was never sent.
 _TERMINAL_GRACE_SECONDS = 3
+# After cancelling a job that never confirmed terminal on its own (the
+# _wait_job_to_terminal timeout path), how long to poll for it to actually
+# reach a terminal state before giving up on releasing the instance. The API
+# cancels via SIGTERM with a 30s grace then SIGKILL, so this must clear that
+# window with margin, not just match it.
+_CANCEL_GRACE_SECONDS = 45
 
 # Matches the runner's exact marker strings (spark_fuse_run.py run_manifest()):
 #   [runner] workflow 2/5 started
@@ -231,19 +237,26 @@ def _wait_job_to_terminal(client, job_id: str, qid: str, label: str):
     rather than killing a job mid-batch — that would risk losing items in the
     batch that had already succeeded, and whether a cancelled job's outputs
     stay downloadable at all is unverified. Only the outer chunk loop in
-    _run_queue consults the cancel flag, between batches."""
+    _run_queue consults the cancel flag, between batches.
+
+    Returns (job, timed_out). timed_out=True means _JOB_TIMEOUT elapsed before
+    the job reached a terminal state: job is a live snapshot, not a confirmed
+    completion, and the caller must not treat it as one — see the timed_out
+    branch in _run_queue, which skips the normal completion path entirely
+    rather than reading exit_code/output off a job that may still be running.
+    """
     job = client.get_job(job_id)
     waited = last_beat = 0
     while not job.is_terminal:
         if waited >= _JOB_TIMEOUT:
-            break
+            return job, True
         time.sleep(5)
         waited += 5
         if waited - last_beat >= 30:
             _append(qid, f"[queue] {label}: running ({waited}s)")
             last_beat = waited
         job = client.get_job(job_id)
-    return job
+    return job, False
 
 
 def _fill_marker_gaps(qid: str, batch_offset: int, count: int, reason: str) -> None:
@@ -289,9 +302,66 @@ def _mark_batches_terminal(qid: str, start_offset: int, batches: list[list[dict]
     return offset
 
 
+def _release_instance(client, qid: str, handle: str, stuck_job_id: str | None) -> None:
+    """Release the session's instance from _run_queue's finally block.
+
+    If stuck_job_id is set, the last batch's job never confirmed terminal (the
+    _wait_job_to_terminal timeout path) and may still be running on this
+    instance — releasing blind would risk a 409 (Spark Fuse's release endpoint
+    refuses to tear down an instance with a job still running on it), which
+    the messenger surfaces as SessionConflictError. Cancel that job first and
+    poll briefly for it to actually go terminal before attempting release.
+
+    Any failure here — cancel failing, the job never confirming terminal, or
+    release itself failing (including an unexpected 409 on the normal path) —
+    is reported as a queue-level failure, not just a scrollback log line: it
+    means the instance is left allocated and billing, which the user needs to
+    see without having to scroll the log.
+    """
+    if stuck_job_id:
+        _append(qid, f"[queue] batch job {stuck_job_id} never confirmed finished; "
+                     f"cancelling it before releasing instance {handle}")
+        try:
+            job = client.cancel(stuck_job_id)
+        except Exception as exc:  # noqa: BLE001
+            _append(qid, f"[queue] cancel failed: {exc}")
+            _set(qid, status="failed",
+                 error=f"instance {handle} may still be running a stuck job "
+                       f"({stuck_job_id}); cancel failed: {exc}. Check it manually.")
+            return
+
+        waited = 0
+        while not job.is_terminal and waited < _CANCEL_GRACE_SECONDS:
+            time.sleep(3)
+            waited += 3
+            job = client.get_job(stuck_job_id)
+
+        if not job.is_terminal:
+            _append(qid, f"[queue] job {stuck_job_id} still not terminal "
+                         f"{waited}s after cancel; leaving instance {handle} "
+                         "running — check it manually")
+            _set(qid, status="failed",
+                 error=f"instance {handle} may still be running; job {stuck_job_id} "
+                       "did not confirm terminal after cancel")
+            return
+
+    try:
+        client.release_instance(handle)
+        _append(qid, "[queue] instance released")
+    except Exception as exc:  # noqa: BLE001
+        _append(qid, f"[queue] release failed: {exc}")
+        _set(qid, status="failed",
+             error=f"instance {handle} may still be running; release failed: {exc}")
+
+
 def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings: dict) -> None:
     client = make_client(settings)
     handle = None
+    # Set when a batch's job never confirmed terminal (see the timed_out branch
+    # below), so `finally` knows to try cancelling it before releasing the
+    # instance instead of releasing blind. None means release can proceed as
+    # normal — either no batch ran, or every batch that did run confirmed terminal.
+    stuck_job_id: str | None = None
     chunk_size = queue_chunk_size(settings)
     batches = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
     try:
@@ -381,7 +451,27 @@ def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings:
             _set_active_job(qid, job_id)
             threading.Thread(target=_stream_chunk, args=(client, job_id, qid, offset),
                              daemon=True).start()
-            job = _wait_job_to_terminal(client, job_id, qid, f"batch {batch_index + 1}/{len(batches)}")
+            job, timed_out = _wait_job_to_terminal(
+                client, job_id, qid, f"batch {batch_index + 1}/{len(batches)}")
+
+            if timed_out:
+                _set_active_job(qid, None)
+                _append(qid, f"[queue] batch {batch_index + 1}/{len(batches)}: gave up "
+                             f"waiting after {_JOB_TIMEOUT}s; the job may still be "
+                             "running. Stopping the queue.")
+                _fill_marker_gaps(
+                    qid, offset, count,
+                    "bridge gave up waiting for this batch's job to finish (it may "
+                    "still be running on Spark Fuse) — not a workflow failure")
+                _finalize_item_errors(qid, offset, count)
+                # Everything after this batch was never submitted, so the handle's
+                # state is unknown until the stuck job is confirmed terminal; do not
+                # risk a second job landing on a possibly still-busy instance.
+                _mark_batches_terminal(
+                    qid, offset + count, batches[batch_index + 1:], status="failed",
+                    error="queue stopped: an earlier batch's job never confirmed finished")
+                stuck_job_id = job_id
+                break
 
             # Grace period for trailing SSE lines before we conclude a marker
             # was never sent, then stop this batch's stream from attributing
@@ -442,9 +532,5 @@ def _run_queue(qid: str, items: list[dict], instance_type: str | None, settings:
     finally:
         _set_active_job(qid, None)
         if handle:
-            try:
-                client.release_instance(handle)
-                _append(qid, "[queue] instance released")
-            except Exception as exc:  # noqa: BLE001
-                _append(qid, f"[queue] release failed: {exc}")
+            _release_instance(client, qid, handle, stuck_job_id)
         jobs._close(client)
