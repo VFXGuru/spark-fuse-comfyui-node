@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.2 — 2026-07-27
+
+A single reliability fix for job submission. No user-facing or documented
+behaviour change; the manual is unchanged. Messenger is unchanged.
+
+### Changed
+
+- **`maxWallClockSeconds` is now set explicitly to 3600 on every job
+  submission**, both single renders and batched queue jobs, rather than
+  being omitted, which on Spark Fuse means never kill. The
+  container-inactivity detector set explicitly in 0.3.1 only fires when
+  stdout, CPU and GPU are all quiet simultaneously, so it catches a stalled
+  container but never a busy one: a workflow spinning the GPU in a loop
+  would have run, and billed, indefinitely. 3600 seconds gives roughly 8x
+  headroom over a warm batch of ten and about 4.6x over our worst observed
+  cold single render, while capping a runaway inside one billing hour.
+  Deliberately kept out of `DEFAULTS`/`PUBLIC_KEYS`, so it cannot be
+  changed from the panel or a raw POST.
+
 ## 0.3.1 — 2026-07-27
 
 Reliability fixes for the render queue and job submission. No user-facing or
