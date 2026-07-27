@@ -21,7 +21,7 @@ from typing import NamedTuple
 from spark_fuse.errors import ShareSyncError
 from spark_fuse.models import LogEvent, QueueStatusEvent
 
-from .config import load_settings, make_client
+from .config import container_inactivity_seconds, load_settings, make_client
 
 # job_id -> {status, lines[], image, error, image_cache_hit, image_affinity, exit_code}
 _JOBS: dict[str, dict] = {}
@@ -260,6 +260,7 @@ def _submit_job(client, api_prompt: dict, *, instance_type, settings, batch_coun
         assets_share_sync_space_name=settings.get("assets_share_sync_space_name") or None,
         image_affinity=settings.get("image_affinity") or None,
         instance_handle=instance_handle,
+        container_inactivity_seconds=container_inactivity_seconds(settings),
     )
     if not (resp.input and resp.input.upload_url):
         raise RuntimeError("No auto-prepare upload URL returned by Spark Fuse.")
@@ -293,6 +294,7 @@ def _submit_chunk_job(client, entries: list[dict], *, instance_type, settings,
         assets_share_sync_space_name=settings.get("assets_share_sync_space_name") or None,
         image_affinity=settings.get("image_affinity") or None,
         instance_handle=instance_handle,
+        container_inactivity_seconds=container_inactivity_seconds(settings),
     )
     if not (resp.input and resp.input.upload_url):
         raise RuntimeError("No auto-prepare upload URL returned by Spark Fuse.")

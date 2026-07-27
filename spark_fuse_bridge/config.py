@@ -77,6 +77,28 @@ def queue_chunk_size(settings: dict) -> int:
         return DEFAULT_QUEUE_CHUNK_SIZE
 
 
+# Container-inactivity threshold, in seconds, sent as containerInactivitySeconds on
+# every job submission (single render and queue chunk alike). The platform default
+# (currently 1800s / 30 min, applied when the field is omitted) is ON by default and
+# fires when stdout/stderr, CPU and GPU are ALL simultaneously quiet for the whole
+# window — a stalled ShareSync read or a blocking plugin shows exactly that signature.
+# Set explicitly to 3600s (1 h) rather than inheriting the default: generous enough
+# that a slow model fetch won't trip it (worst observed cold start: 28.5 GiB over
+# ~13 min, and not silent), while still catching a genuinely stuck container within
+# one billing hour. Deliberately NOT in DEFAULTS/PUBLIC_KEYS, same reasoning and same
+# mechanism as DEFAULT_QUEUE_CHUNK_SIZE above: a user setting 0 (disables the detector
+# entirely) or a too-low value would remove our only backstop, since
+# maxWallClockSeconds is also null (never kill) by default. Not a panel control.
+DEFAULT_CONTAINER_INACTIVITY_SECONDS = 3600
+
+
+def container_inactivity_seconds(settings: dict) -> int:
+    try:
+        return int(settings.get("container_inactivity_seconds") or DEFAULT_CONTAINER_INACTIVITY_SECONDS)
+    except (TypeError, ValueError):
+        return DEFAULT_CONTAINER_INACTIVITY_SECONDS
+
+
 def _settings_path() -> Path:
     """Resolve where the settings file lives, migrating a legacy copy on first use.
 
