@@ -1,6 +1,6 @@
 [project]
 name = "spark-fuse-comfyui-node"
-version = "0.3.0"
+version = "0.3.1"
 description = "Click the ⚡ button to render your open ComfyUI workflow on a Spark Fuse cloud GPU and pull the result back into your graph. No CLI, no file export."
 readme = "README.md"
 license = { text = "MIT" }

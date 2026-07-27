@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.1 — 2026-07-27
+
+Reliability fixes for the render queue and job submission. No user-facing or
+documented behaviour changes; the manual is unchanged. Messenger is unchanged.
+
+### Fixed
+
+- **The queue's per-batch job wait no longer fails silently on timeout.**
+  When the 2-hour per-batch ceiling was reached, the wait broke out with no
+  log line and handed back a job that was still running, which downstream
+  code treated as finished: the queue could report success while the
+  instance was still running a job, and the subsequent release call would
+  hit a 409 that was swallowed into a single log line. The timeout is now
+  logged loudly; affected items are marked failed with a reason that
+  distinguishes the bridge giving up waiting from an actual workflow
+  failure; the queue stops rather than submitting further batches onto a
+  handle whose state is uncertain; the still-running job is cancelled and
+  confirmed terminal before the instance is released; and a release failure
+  now surfaces as a queue-level error rather than a single scrollback line.
+
+### Changed
+
+- **`containerInactivitySeconds` is now set explicitly to 3600 on every job
+  submission**, both single renders and batched queue jobs, rather than
+  inheriting the platform's 1800-second default. Spark Fuse's
+  container-inactivity detector fires when stdout, CPU and GPU are all
+  simultaneously quiet at once, and the exposure grew once the bridge
+  started batching up to 10 workflows into a single job. Deliberately kept
+  out of `DEFAULTS`/`PUBLIC_KEYS`, so it cannot be changed from the panel
+  or a raw POST.
+
 ## 0.3.0 — 2026-07-25
 
 Multi-workflow render queue, backed by the already-published spark-fuse-comfyui
