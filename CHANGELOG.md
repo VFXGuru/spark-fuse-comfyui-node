@@ -2,8 +2,19 @@
 
 ## 0.3.3 — 2026-10-22
 
-A single tuning change for job submission. No user-facing or documented
-behaviour change; the manual is unchanged. Messenger is unchanged.
+A tuning change for job submission and a corrected install requirement. No
+user-facing or documented behaviour change; the manual is unchanged.
+Messenger is unchanged.
+
+### Fixed
+
+- **`requirements.txt` now requires `spark-fuse-messenger>=0.5.0`**,
+  matching `pyproject.toml` and the manual. It still allowed 0.4.x, which
+  predates the ShareSync staging functions that model sync depends on, so
+  the documented `pip install -r requirements.txt` route could install it.
+  With messenger 0.4.x, `model_sync`'s import of `DEFAULT_MAX_PUT_BYTES`
+  fails, so `routes.py` cannot import `model_sync` and the node does not load
+  in ComfyUI at all.
 
 ### Changed
 
