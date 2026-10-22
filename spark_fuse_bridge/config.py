@@ -78,18 +78,21 @@ def queue_chunk_size(settings: dict) -> int:
 
 
 # Container-inactivity threshold, in seconds, sent as containerInactivitySeconds on
-# every job submission (single render and queue chunk alike). The platform default
-# (currently 1800s / 30 min, applied when the field is omitted) is ON by default and
-# fires when stdout/stderr, CPU and GPU are ALL simultaneously quiet for the whole
-# window — a stalled ShareSync read or a blocking plugin shows exactly that signature.
-# Set explicitly to 3600s (1 h) rather than inheriting the default: generous enough
-# that a slow model fetch won't trip it (worst observed cold start: 28.5 GiB over
-# ~13 min, and not silent), while still catching a genuinely stuck container within
-# one billing hour. Deliberately NOT in DEFAULTS/PUBLIC_KEYS, same reasoning and same
-# mechanism as DEFAULT_QUEUE_CHUNK_SIZE above: a user setting 0 (disables the detector
-# entirely) or a too-low value would remove our only backstop, since
-# maxWallClockSeconds is also null (never kill) by default. Not a panel control.
-DEFAULT_CONTAINER_INACTIVITY_SECONDS = 3600
+# every job submission (single render and queue chunk alike). Fires when stdout/stderr,
+# CPU and GPU are ALL simultaneously quiet for the whole window — a stalled ShareSync
+# read or a blocking plugin shows exactly that signature, and a container producing
+# nothing on any of the three signals is almost certainly wedged, not legitimately busy.
+# Set explicitly to 1800s (30 min), matching Spark Fuse's own platform default — a value
+# they consider safe for real workloads — rather than the longer 3600s used for
+# maxWallClockSeconds below: that ceiling covers a BUSY runaway (e.g. a workflow
+# spinning the GPU), where legitimate long-running work means an hour of headroom is
+# warranted, whereas a genuinely silent, wedged container does not need anywhere near
+# that long to be caught. Deliberately NOT in DEFAULTS/PUBLIC_KEYS, same reasoning and
+# same mechanism as DEFAULT_QUEUE_CHUNK_SIZE above: a user setting 0 (disables the
+# detector entirely) or a too-low value would remove our only backstop against a
+# wedged container, since maxWallClockSeconds alone would leave it running for up to an
+# hour. Not a panel control.
+DEFAULT_CONTAINER_INACTIVITY_SECONDS = 1800
 
 
 def container_inactivity_seconds(settings: dict) -> int:

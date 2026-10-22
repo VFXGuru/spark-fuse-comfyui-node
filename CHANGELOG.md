@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.3 — 2026-10-22
+
+A tuning change for job submission and a corrected install requirement. No
+user-facing or documented behaviour change; the manual is unchanged.
+Messenger is unchanged.
+
+### Fixed
+
+- **`requirements.txt` now requires `spark-fuse-messenger>=0.5.0`**,
+  matching `pyproject.toml` and the manual. It still allowed 0.4.x, which
+  predates the ShareSync staging functions that model sync depends on, so
+  the documented `pip install -r requirements.txt` route could install it.
+  With messenger 0.4.x, `model_sync`'s import of `DEFAULT_MAX_PUT_BYTES`
+  fails, so `routes.py` cannot import `model_sync` and the node does not load
+  in ComfyUI at all.
+
+### Changed
+
+- **`containerInactivitySeconds` is now set to 1800 on every job
+  submission**, down from the 3600 set explicitly in 0.3.1, matching Spark
+  Fuse's own platform default. The two container protections now carry
+  different values because they catch different failures.
+  `maxWallClockSeconds` stays at 3600: it is the ceiling for a busy runaway,
+  such as a workflow spinning the GPU, where legitimate long-running work
+  warrants an hour of headroom. The inactivity detector fires only when
+  stdout, CPU and GPU are all quiet simultaneously, and a container silent
+  on all three at once is almost certainly wedged rather than busy, so it
+  does not warrant a full hour before it is caught. Still deliberately kept
+  out of `DEFAULTS`/`PUBLIC_KEYS`, so it cannot be changed from the panel or
+  a raw POST.
+
 ## 0.3.2 — 2026-07-27
 
 A single reliability fix for job submission. No user-facing or documented
