@@ -83,15 +83,13 @@ def queue_chunk_size(settings: dict) -> int:
 # read or a blocking plugin shows exactly that signature, and a container producing
 # nothing on any of the three signals is almost certainly wedged, not legitimately busy.
 # Set explicitly to 1800s (30 min), matching Spark Fuse's own platform default — a value
-# they consider safe for real workloads — rather than the longer 3600s used for
-# maxWallClockSeconds below: that ceiling covers a BUSY runaway (e.g. a workflow
-# spinning the GPU), where legitimate long-running work means an hour of headroom is
-# warranted, whereas a genuinely silent, wedged container does not need anywhere near
-# that long to be caught. Deliberately NOT in DEFAULTS/PUBLIC_KEYS, same reasoning and
-# same mechanism as DEFAULT_QUEUE_CHUNK_SIZE above: a user setting 0 (disables the
-# detector entirely) or a too-low value would remove our only backstop against a
-# wedged container, since maxWallClockSeconds alone would leave it running for up to an
-# hour. Not a panel control.
+# they consider safe for real workloads. A genuinely silent, wedged container does not
+# need longer than that to be caught. maxWallClockSeconds is omitted on submit (Spark
+# Fuse's default is never kill) so a legitimately long ComfyUI render is not cut off;
+# this inactivity detector is therefore the only automatic backstop against a wedged
+# container. Deliberately NOT in DEFAULTS/PUBLIC_KEYS, same reasoning and same
+# mechanism as DEFAULT_QUEUE_CHUNK_SIZE above: a user setting 0 (disables the detector
+# entirely) or a too-low value would remove that backstop. Not a panel control.
 DEFAULT_CONTAINER_INACTIVITY_SECONDS = 1800
 
 
@@ -100,29 +98,6 @@ def container_inactivity_seconds(settings: dict) -> int:
         return int(settings.get("container_inactivity_seconds") or DEFAULT_CONTAINER_INACTIVITY_SECONDS)
     except (TypeError, ValueError):
         return DEFAULT_CONTAINER_INACTIVITY_SECONDS
-
-
-# Hard wall-clock ceiling, in seconds, sent as maxWallClockSeconds on every job
-# submission (single render and queue chunk alike). Unlike containerInactivitySeconds,
-# this fires on elapsed time regardless of activity, so it is the only backstop
-# against a workflow that keeps the GPU busy in a loop — every signal the inactivity
-# detector watches (stdout, CPU, GPU) stays alive in that case, so that detector alone
-# never catches it. Defaults to null (never kill) if omitted. Set explicitly to 3600s
-# (1 h): roughly 8x headroom over a warm 10-workflow batch (~182s + ~25s/additional,
-# under 7 min) and about 4.6x over our worst observed cold single render (~773s
-# pulling 28.5 GiB), while still capping a runaway within one billing hour.
-# Deliberately NOT in DEFAULTS/PUBLIC_KEYS, same reasoning and same mechanism as
-# DEFAULT_CONTAINER_INACTIVITY_SECONDS above: a user setting this too low (or unset,
-# reverting to null/never-kill) would remove our only backstop against a busy-looping
-# container. Not a panel control.
-DEFAULT_MAX_WALL_CLOCK_SECONDS = 3600
-
-
-def max_wall_clock_seconds(settings: dict) -> int:
-    try:
-        return int(settings.get("max_wall_clock_seconds") or DEFAULT_MAX_WALL_CLOCK_SECONDS)
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_WALL_CLOCK_SECONDS
 
 
 def _settings_path() -> Path:

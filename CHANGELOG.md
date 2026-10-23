@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`maxWallClockSeconds` is no longer sent on job submission.** Spark Fuse
+  treats an omitted value as never kill, so a long ComfyUI render is not
+  failed at one hour. `containerInactivitySeconds` stays at 1800 and still
+  stops a container that is silent on stdout, CPU and GPU together.
+
 ## 0.3.3 — 2026-10-22
 
 A tuning change for job submission and a corrected install requirement. No
