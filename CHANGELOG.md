@@ -1,13 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.3.4 — 2026-10-23
+
+A reliability fix for job submission: long renders are no longer cut off at
+one hour. No documented behaviour change; the manual is unchanged. Messenger
+is unchanged.
 
 ### Changed
 
-- **`maxWallClockSeconds` is no longer sent on job submission.** Spark Fuse
-  treats an omitted value as never kill, so a long ComfyUI render is not
-  failed at one hour. `containerInactivitySeconds` stays at 1800 and still
-  stops a container that is silent on stdout, CPU and GPU together.
+- **`maxWallClockSeconds` is no longer sent on job submission**, for both
+  single renders and batched queue jobs. The fixed 3600-second ceiling set
+  explicitly in 0.3.2 was failing legitimate long renders for several users.
+  With the field omitted, Spark Fuse applies its default of never kill, so
+  elapsed time alone no longer ends a job. The 1800-second
+  `containerInactivitySeconds` detector is now the only automatic backstop,
+  and it fires only when stdout, CPU and GPU are all quiet simultaneously. A
+  container that is wedged and silent is still stopped, but a workflow that
+  keeps the GPU busy is no longer capped, so a busy runaway will run, and
+  bill, until it is cancelled. This is deliberate: the previous ceiling was
+  cutting off real work. `containerInactivitySeconds` itself is unchanged.
 
 ## 0.3.3 — 2026-10-22
 
