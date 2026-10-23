@@ -25,7 +25,6 @@ from .config import (
     container_inactivity_seconds,
     load_settings,
     make_client,
-    max_wall_clock_seconds,
 )
 
 # job_id -> {status, lines[], image, error, image_cache_hit, image_affinity, exit_code}
@@ -266,7 +265,6 @@ def _submit_job(client, api_prompt: dict, *, instance_type, settings, batch_coun
         image_affinity=settings.get("image_affinity") or None,
         instance_handle=instance_handle,
         container_inactivity_seconds=container_inactivity_seconds(settings),
-        max_wall_clock_seconds=max_wall_clock_seconds(settings),
     )
     if not (resp.input and resp.input.upload_url):
         raise RuntimeError("No auto-prepare upload URL returned by Spark Fuse.")
@@ -301,7 +299,6 @@ def _submit_chunk_job(client, entries: list[dict], *, instance_type, settings,
         image_affinity=settings.get("image_affinity") or None,
         instance_handle=instance_handle,
         container_inactivity_seconds=container_inactivity_seconds(settings),
-        max_wall_clock_seconds=max_wall_clock_seconds(settings),
     )
     if not (resp.input and resp.input.upload_url):
         raise RuntimeError("No auto-prepare upload URL returned by Spark Fuse.")
