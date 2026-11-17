@@ -85,7 +85,10 @@ environment variables). Then:
   `/assets`. The panel previews the resolved path live as you type and
   validates the leading slash before submit.
 - **GPU**: pick an instance type; the hourly rate shows beside it. The list
-  shows GPU instances only, grouped by family and size.
+  shows GPU instances only, in the order Spark Fuse returns them, grouped
+  under the GPU name. Each SKU shows a short GPU name, cores, and RAM on
+  one line, such as `g6e.xlarge · L40S · 4core 16GB`, including on the closed field.
+  VRAM is on the group header when every SKU in that group shares one figure.
 - **Image affinity**: defaults to `preferred`, which does cached-image
   placement silently. `required` does the same placement and reports whether
   repeated runs hit the image cache.
