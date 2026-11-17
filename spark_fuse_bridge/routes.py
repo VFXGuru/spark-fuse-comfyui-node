@@ -6,7 +6,6 @@ ComfyUI's asyncio event loop.
 from __future__ import annotations
 
 import asyncio
-import re
 
 from aiohttp import web
 from server import PromptServer
@@ -19,26 +18,6 @@ routes = PromptServer.instance.routes
 async def _run(func):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, func)
-
-
-_SIZE_RE = re.compile(r"(\d*)xlarge")
-
-
-def _sku_sort_key(instance_type: str) -> tuple:
-    """Group SKUs by family (text before the first '.'), then order by size.
-
-    The size multiplier is read off an "Nxlarge" suffix (xlarge -> 1,
-    2xlarge -> 2, 12xlarge -> 12, ...), so new sizes and new GPU families sort
-    correctly without a hardcoded family list. An instanceType that does not
-    match the "<family>.<size>" shape falls back to alphabetical order after
-    every well-formed entry, rather than raising.
-    """
-    family, _, size = instance_type.partition(".")
-    match = _SIZE_RE.fullmatch(size)
-    if match:
-        multiplier = int(match.group(1)) if match.group(1) else 1
-        return (0, family, multiplier)
-    return (1, instance_type, 0)
 
 
 @routes.get("/spark_fuse/settings")
@@ -78,8 +57,11 @@ async def get_skus(request):
                     "instanceType": sku.get("instanceType"),
                     "gpuType": gpu_type,
                     "gpuMemoryGb": sku.get("gpuMemoryGb"),
+                    "coreCount": sku.get("coreCount"),
+                    "memoryGb": sku.get("memoryGb"),
                 })
-            out.sort(key=lambda s: _sku_sort_key(s.get("instanceType") or ""))
+            # Keep the endpoint's catalog order (order_num). A name sort
+            # puts gr6 after g7e.
             return out
         finally:
             jobs._close(client)

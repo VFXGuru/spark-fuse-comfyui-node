@@ -139,18 +139,56 @@ async function loadSettings() {
   } catch (e) { setStatus(`Could not load settings: ${e}`, "#ff8888"); }
 }
 
+function specNumber(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Closed field shows this line only. The GPU name lives on the optgroup.
+function skuLine(sku) {
+  const bits = [];
+  const cores = specNumber(sku.coreCount);
+  const ram = specNumber(sku.memoryGb);
+  if (cores != null) bits.push(`${cores} cores`);
+  if (ram != null) bits.push(`${ram} GB`);
+  return bits.length ? `${sku.instanceType} — ${bits.join(", ")}` : sku.instanceType;
+}
+
+// VRAM goes on the header only when every SKU in the group shares one figure.
+function gpuGroupLabel(group) {
+  const name = group[0].gpuType || "GPU";
+  const mems = group.map((sku) => specNumber(sku.gpuMemoryGb));
+  if (mems.length && mems.every((m) => m != null && m === mems[0])) return `${name} ${mems[0]}GB`;
+  return name;
+}
+
 async function loadSkus() {
   const select = document.getElementById("sf-sku");
   try {
     const data = await api("/skus");
     if (data.error) { setStatus(`Could not list GPUs: ${data.error}`, "#ff8888"); setRenderEnabled(false); return; }
     const saved = (await api("/settings")).instance_type;
-    select.innerHTML = "";
+    const groups = [];
+    const byGpu = new Map();
     for (const sku of data.skus) {
       if (!sku.instanceType) continue;
-      const mem = sku.gpuMemoryGb ? ` ${sku.gpuMemoryGb}GB` : "";
-      const gpu = sku.gpuType ? ` (${sku.gpuType}${mem})` : "";
-      select.append(el("option", { value: sku.instanceType, textContent: `${sku.instanceType}${gpu}` }));
+      const key = sku.gpuType || "";
+      let group = byGpu.get(key);
+      if (!group) {
+        group = [];
+        byGpu.set(key, group);
+        groups.push(group);
+      }
+      group.push(sku);
+    }
+    select.innerHTML = "";
+    for (const group of groups) {
+      const optgroup = el("optgroup", { label: gpuGroupLabel(group) });
+      for (const sku of group) {
+        optgroup.append(el("option", { value: sku.instanceType, textContent: skuLine(sku) }));
+      }
+      select.append(optgroup);
     }
     if (saved) select.value = saved;
     updateRate();

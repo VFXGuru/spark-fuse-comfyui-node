@@ -9,6 +9,14 @@
   `GET /api/compute/skus`. Rows with no `gpuType` are still dropped, so an
   older server that ignores the query keeps the same list. Requires a
   messenger that accepts `gpu_only` on `list_skus`.
+- **The GPU menu is grouped by GPU name.** Each section header is the GPU,
+  plus VRAM when every SKU in that section shares one figure. Each entry is
+  the SKU with its cores and RAM, for example `g7.8xlarge — 32 cores, 128 GB`.
+  The closed field shows that short line.
+- **The GPU list keeps the order returned by Spark Fuse.** The bridge no
+  longer re-sorts SKUs by the text before the dot, which had placed
+  `gr6.8xlarge` after every `g7e` size. Catalog `order_num` puts it with the
+  other L4 sizes, after `g6.16xlarge`.
 
 ## 0.3.4 — 2026-10-23
 

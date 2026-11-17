@@ -85,7 +85,9 @@ environment variables). Then:
   `/assets`. The panel previews the resolved path live as you type and
   validates the leading slash before submit.
 - **GPU**: pick an instance type; the hourly rate shows beside it. The list
-  shows GPU instances only, grouped by family and size.
+  shows GPU instances only, in the order Spark Fuse returns them, grouped
+  under the GPU name. Each SKU shows its cores and RAM. VRAM is on the group
+  header when every SKU in that group shares one figure.
 - **Image affinity**: `required` reports whether repeated runs hit the image
   cache; `preferred` does the same placement silently.
 - **Batch count**: how many images one job renders (section 6.1).
