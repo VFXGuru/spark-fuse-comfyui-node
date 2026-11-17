@@ -65,10 +65,10 @@ async def get_skus(request):
         client.login()
         try:
             out = []
-            for sku in client.list_skus():
-                # Only dict-shaped entries carry a gpuType. A bare string SKU
-                # (the server passes the list through unprocessed, so its
-                # shape can drift) or a dict with no GPU cannot run a render.
+            # gpuOnly=true asks the API for SKUs with a GPU. A bare string,
+            # or a dict with no gpuType, still cannot run a render — an older
+            # server that ignores the query would otherwise hand those back.
+            for sku in client.list_skus(gpu_only=True):
                 if not isinstance(sku, dict):
                     continue
                 gpu_type = sku.get("gpuType")

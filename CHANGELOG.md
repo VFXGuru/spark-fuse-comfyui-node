@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The GPU dropdown asks Spark Fuse for GPU SKUs only.** The bridge calls
+  `list_skus(gpu_only=True)`, which sends `gpuOnly=true` on
+  `GET /api/compute/skus`. Rows with no `gpuType` are still dropped, so an
+  older server that ignores the query keeps the same list. Requires a
+  messenger that accepts `gpu_only` on `list_skus`.
+
 ## 0.3.4 — 2026-10-23
 
 A reliability fix for job submission: long renders are no longer cut off at
