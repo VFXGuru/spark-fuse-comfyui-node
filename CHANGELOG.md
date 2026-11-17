@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Image affinity now defaults to `preferred`.** New installs, and any
+  settings file that does not set `image_affinity`, submit with `preferred`
+  instead of `required`. A settings file that already saved `required` keeps
+  that choice until it is changed in the panel. Changing the dropdown saves
+  immediately, so reopening the panel keeps the last selection.
+
 ## 0.3.4 — 2026-10-23
 
 A reliability fix for job submission: long renders are no longer cut off at
