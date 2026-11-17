@@ -1,6 +1,6 @@
 # Spark Fuse Cloud GPU Bridge — User Manual
 
-**Version 0.3.0 · July 2026**
+**Version 0.3.5 · November 2026**
 
 The Spark Fuse Cloud GPU Bridge is a ComfyUI extension that renders your current
 workflow on a Spark Fuse cloud GPU and brings the finished images straight back

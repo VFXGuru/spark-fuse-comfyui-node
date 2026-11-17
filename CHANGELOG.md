@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.3.5 — 2026-11-17
+
+A GPU list rework that tolerates an older messenger, and image affinity now
+defaulting to `preferred`. Messenger is unchanged: `>=0.5.0` still applies.
 
 ### Changed
 
