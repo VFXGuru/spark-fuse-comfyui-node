@@ -89,8 +89,9 @@ environment variables). Then:
   under the GPU name. Each SKU shows a short GPU name, cores, and RAM on
   one line, such as `g6e.xlarge · L40S · 4core 16GB`, including on the closed field.
   VRAM is on the group header when every SKU in that group shares one figure.
-- **Image affinity**: `required` reports whether repeated runs hit the image
-  cache; `preferred` does the same placement silently.
+- **Image affinity**: defaults to `preferred`, which does cached-image
+  placement silently. `required` does the same placement and reports whether
+  repeated runs hit the image cache.
 - **Batch count**: how many images one job renders (section 6.1).
 
 Click **Save settings**. Settings persist in `spark_fuse_settings.json` under
@@ -228,7 +229,7 @@ settings**; survives node updates, uninstall and reinstall):
 | `instance_type` | `g7e.2xlarge` | GPU SKU |
 | `assets_share_sync_path` | `/comfy-flux2-klein/models` | ShareSync folder mounted at `/assets` |
 | `assets_share_sync_space_name` | empty | ShareSync Project holding the assets path (empty = Personal space) |
-| `image_affinity` | `required` | Cached-image placement reporting |
+| `image_affinity` | `preferred` | Cached-image placement (`required` also reports cache hits) |
 | `batch_count` | `1` | Images per job (1 to 100) |
 | `upload_guard_gb` | `50` | Model-sync upload guard in GB; `0` disables |
 

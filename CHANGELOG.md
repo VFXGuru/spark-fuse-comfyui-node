@@ -4,14 +4,21 @@
 
 ### Changed
 
+- **Image affinity now defaults to `preferred`.** New installs, and any
+  settings file that does not set `image_affinity`, submit with `preferred`
+  instead of `required`. A settings file that already saved `required` keeps
+  that choice until it is changed in the panel. Changing the dropdown saves
+  immediately, so reopening the panel keeps the last selection.
 - **The GPU dropdown asks Spark Fuse for GPU SKUs only.** The bridge calls
-  `list_skus(gpu_only=True)`, which sends `gpuOnly=true` on
-  `GET /api/compute/skus`. Rows with no `gpuType` are still dropped, so an
-  older server that ignores the query keeps the same list. Requires a
-  messenger that accepts `gpu_only` on `list_skus`.
+  `list_skus(gpu_only=True)` when the installed messenger supports it, which
+  sends `gpuOnly=true` on `GET /api/compute/skus`, and falls back to
+  `list_skus()` on an older messenger that does not accept `gpu_only`. Rows
+  with no `gpuType` are still dropped either way, so an older server that
+  ignores the query, or a messenger without the parameter, keeps the same
+  list.
 - **The GPU menu is grouped by GPU name.** Each section header is the GPU,
   plus VRAM when every SKU in that section shares one figure. Each entry is
-  the SKU with its cores and RAM, for example `g7.8xlarge — 32 cores, 128 GB`.
+  the SKU with its cores and RAM, for example `g7e.2xlarge · RTX PRO 6000 · 8core 64GB`.
   The closed field shows that short line.
 - **The GPU list keeps the order returned by Spark Fuse.** The bridge no
   longer re-sorts SKUs by the text before the dot, which had placed

@@ -68,6 +68,9 @@ function buildPanel() {
   const affinitySelect = el("select", { id: "sf-affinity", style: inputStyle() });
   affinitySelect.append(el("option", { value: "preferred", textContent: "preferred" }),
                         el("option", { value: "required", textContent: "required" }));
+  // Persist immediately. Opening the panel reloads the settings file, so a
+  // change that waited for Save settings was replaced by the stored value.
+  affinitySelect.onchange = () => { saveImageAffinity(); };
 
   const hostInput = el("input", { id: "sf-host", type: "text", placeholder: "https://api.prod...", style: inputStyle() });
   const emailInput = el("input", { id: "sf-email", type: "text", style: inputStyle() });
@@ -333,6 +336,20 @@ function updateAssetsPreview() {
   } else {
     preview.textContent = `Resolves to: ${raw}`;
     preview.style.color = "";
+  }
+}
+
+async function saveImageAffinity() {
+  const value = document.getElementById("sf-affinity").value;
+  if (value !== "preferred" && value !== "required") return;
+  try {
+    await api("/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_affinity: value }),
+    });
+  } catch (e) {
+    setStatus(`Could not save image affinity: ${e}`, "#ff8888");
   }
 }
 

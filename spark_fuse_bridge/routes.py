@@ -47,7 +47,13 @@ async def get_skus(request):
             # gpuOnly=true asks the API for SKUs with a GPU. A bare string,
             # or a dict with no gpuType, still cannot run a render — an older
             # server that ignores the query would otherwise hand those back.
-            for sku in client.list_skus(gpu_only=True):
+            try:
+                skus = client.list_skus(gpu_only=True)
+            except TypeError:
+                # spark-fuse-messenger 0.5.0 defines list_skus(self) with no
+                # gpu_only parameter; the gpuType filter below covers it.
+                skus = client.list_skus()
+            for sku in skus:
                 if not isinstance(sku, dict):
                     continue
                 gpu_type = sku.get("gpuType")

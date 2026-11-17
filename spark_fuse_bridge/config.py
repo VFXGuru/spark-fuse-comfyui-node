@@ -39,7 +39,7 @@ DEFAULTS = {
     "assets_share_sync_path": "/comfy-flux2-klein/models",
     "assets_share_sync_space_name": "",
     "model_base_dir": "/assets",
-    "image_affinity": "required",
+    "image_affinity": "preferred",
     "batch_count": 1,
     # Pre-render model sync: largest single model the bridge will upload in-node,
     # in GB. A practicality guard against huge non-resumable transfers, not a
