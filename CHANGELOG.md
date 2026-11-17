@@ -17,6 +17,10 @@
   longer re-sorts SKUs by the text before the dot, which had placed
   `gr6.8xlarge` after every `g7e` size. Catalog `order_num` puts it with the
   other L4 sizes, after `g6.16xlarge`.
+- **Each GPU row names the GPU.** The closed field and each line include a
+  short name, such as `g7e.2xlarge · RTX PRO 6000 · 8core 64GB` or
+  `g6e.xlarge · L40S · 4core 16GB`. Section headings are white, drawn in
+  the panel's own menu, because the system menu paints them too dark to read.
 
 ## 0.3.4 — 2026-10-23
 

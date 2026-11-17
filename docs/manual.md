@@ -86,8 +86,9 @@ environment variables). Then:
   validates the leading slash before submit.
 - **GPU**: pick an instance type; the hourly rate shows beside it. The list
   shows GPU instances only, in the order Spark Fuse returns them, grouped
-  under the GPU name. Each SKU shows its cores and RAM. VRAM is on the group
-  header when every SKU in that group shares one figure.
+  under the GPU name. Each SKU shows a short GPU name, cores, and RAM on
+  one line, such as `g6e.xlarge · L40S · 4core 16GB`, including on the closed field.
+  VRAM is on the group header when every SKU in that group shares one figure.
 - **Image affinity**: `required` reports whether repeated runs hit the image
   cache; `preferred` does the same placement silently.
 - **Batch count**: how many images one job renders (section 6.1).

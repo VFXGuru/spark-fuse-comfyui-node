@@ -18,7 +18,11 @@ let activeUploadId = null;
 let uploadBadge = null;
 
 function el(tag, props = {}, ...children) {
-  const node = Object.assign(document.createElement(tag), props);
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "role" || key.includes("-")) node.setAttribute(key, value == null ? "" : String(value));
+    else node[key] = value;
+  }
   for (const c of children) node.append(c);
   return node;
 }
@@ -40,9 +44,21 @@ function buildPanel() {
     el("span", {},
       el("strong", { textContent: "Render on Spark Fuse" }),
       el("span", { id: "sf-version", style: "opacity:0.6;font-size:11px;margin-left:6px;" })),
-    el("span", { textContent: "✕", style: "cursor:pointer;opacity:0.7;", onclick: () => (panel.style.display = "none") }));
+    el("span", { textContent: "✕", style: "cursor:pointer;opacity:0.7;", onclick: () => { closeSkuMenu(); panel.style.display = "none"; } }));
 
-  const skuSelect = el("select", { id: "sf-sku", style: "padding:4px;background:#2a2a2a;color:#eee;border:1px solid #555;" });
+  const skuSelect = el("select", { id: "sf-sku", style: "display:none;", "aria-hidden": "true" });
+  const skuButton = el("button", {
+    id: "sf-sku-button", type: "button",
+    style: "display:flex;align-items:center;gap:8px;width:100%;padding:4px 8px;background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:13px;text-align:left;",
+    "aria-haspopup": "listbox", "aria-expanded": "false",
+    onclick: (e) => { e.stopPropagation(); toggleSkuMenu(); },
+  },
+    el("span", { id: "sf-sku-label", textContent: "Pick a GPU", style: "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" }),
+    el("span", { textContent: "▾", "aria-hidden": "true", style: "opacity:0.7;" }));
+  const skuMenu = el("div", {
+    id: "sf-sku-menu", hidden: true, role: "listbox", "aria-label": "GPU",
+    style: "position:fixed;z-index:10001;max-height:min(70vh,420px);overflow:auto;background:#2a2a2a;color:#eee;border:1px solid #666;border-radius:4px;padding:4px 0;box-shadow:0 8px 24px rgba(0,0,0,0.45);",
+  });
   const rateLabel = el("div", { id: "sf-rate", textContent: "", style: "font-size:12px;opacity:0.8;margin-bottom:8px;" });
   skuSelect.onchange = updateRate;
 
@@ -87,9 +103,14 @@ function buildPanel() {
             height:280px;min-height:120px;resize:vertical;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0 0 8px;` });
   const preview = el("img", { id: "sf-preview", style: "max-width:100%;border:1px solid #333;border-radius:4px;display:none;" });
 
+  const gpuField = el("div", { style: "display:flex;flex-direction:column;gap:2px;font-size:12px;margin-bottom:8px;" },
+    el("span", { textContent: "GPU", style: "opacity:0.8;" }),
+    skuButton, skuSelect);
+  document.body.append(skuMenu);
+
   panel.append(
     title,
-    field("GPU", skuSelect), rateLabel,
+    gpuField, rateLabel,
     field("Assets ShareSync path (models)", assetsInput),
     assetsPreview,
     field("Image affinity", affinitySelect),
@@ -145,14 +166,84 @@ function specNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Closed field shows this line only. The GPU name lives on the optgroup.
+// "NVIDIA RTX PRO 6000 Blackwell" -> "RTX PRO 6000", "NVIDIA L40S" -> "L40S".
+function shortGpuName(gpuType) {
+  if (!gpuType) return "";
+  return gpuType.replace(/^NVIDIA\s+/i, "").replace(/\s+Blackwell\b/i, "").trim();
+}
+
+// Shown on the closed field and on each row, so the GPU is visible without
+// opening the section it belongs to.
 function skuLine(sku) {
-  const bits = [];
   const cores = specNumber(sku.coreCount);
   const ram = specNumber(sku.memoryGb);
-  if (cores != null) bits.push(`${cores} cores`);
-  if (ram != null) bits.push(`${ram} GB`);
-  return bits.length ? `${sku.instanceType} — ${bits.join(", ")}` : sku.instanceType;
+  const size = [];
+  if (cores != null) size.push(`${cores}core`);
+  if (ram != null) size.push(`${ram}GB`);
+  const tail = [shortGpuName(sku.gpuType), size.join(" ")].filter(Boolean).join(" · ");
+  return tail ? `${sku.instanceType} · ${tail}` : sku.instanceType;
+}
+
+function syncSkuButton() {
+  const select = document.getElementById("sf-sku");
+  const label = document.getElementById("sf-sku-label");
+  if (!select || !label) return;
+  const option = select.selectedOptions && select.selectedOptions[0];
+  label.textContent = (option && option.value) ? option.textContent : (select.value || "Pick a GPU");
+}
+
+function closeSkuMenu() {
+  const menu = document.getElementById("sf-sku-menu");
+  const button = document.getElementById("sf-sku-button");
+  if (menu) menu.hidden = true;
+  if (button) button.setAttribute("aria-expanded", "false");
+}
+
+function toggleSkuMenu() {
+  const menu = document.getElementById("sf-sku-menu");
+  const button = document.getElementById("sf-sku-button");
+  if (!menu || !button) return;
+  if (!menu.hidden) { closeSkuMenu(); return; }
+  const rect = button.getBoundingClientRect();
+  menu.style.left = `${Math.round(rect.left)}px`;
+  menu.style.top = `${Math.round(rect.bottom + 4)}px`;
+  menu.style.width = "max-content";
+  menu.style.minWidth = `${Math.round(rect.width)}px`;
+  menu.hidden = false;
+  const overflow = menu.getBoundingClientRect().right - (window.innerWidth - 8);
+  if (overflow > 0) menu.style.left = `${Math.max(8, Math.round(rect.left - overflow))}px`;
+  button.setAttribute("aria-expanded", "true");
+  const selected = menu.querySelector("[aria-selected='true']");
+  if (selected) selected.scrollIntoView({ block: "nearest" });
+}
+
+document.addEventListener("click", (e) => {
+  const menu = document.getElementById("sf-sku-menu");
+  const button = document.getElementById("sf-sku-button");
+  if (!menu || menu.hidden) return;
+  if (menu.contains(e.target) || (button && button.contains(e.target))) return;
+  closeSkuMenu();
+});
+
+function chooseSku(instanceType) {
+  const select = document.getElementById("sf-sku");
+  if (!select) return;
+  select.value = instanceType;
+  select.dispatchEvent(new Event("change"));
+  syncSkuButton();
+  markSelectedSku(instanceType);
+  closeSkuMenu();
+}
+
+function markSelectedSku(instanceType) {
+  const menu = document.getElementById("sf-sku-menu");
+  if (!menu) return;
+  for (const row of menu.querySelectorAll("[data-instance-type]")) {
+    const on = row.dataset.instanceType === instanceType;
+    row.setAttribute("aria-selected", on ? "true" : "false");
+    row.style.background = on ? "#5b4db8" : "";
+    row.style.color = on ? "#fff" : "#d5d5d5";
+  }
 }
 
 // VRAM goes on the header only when every SKU in the group shares one figure.
@@ -183,14 +274,36 @@ async function loadSkus() {
       group.push(sku);
     }
     select.innerHTML = "";
+    const menu = document.getElementById("sf-sku-menu");
+    if (menu) menu.replaceChildren();
     for (const group of groups) {
       const optgroup = el("optgroup", { label: gpuGroupLabel(group) });
+      if (menu) {
+        menu.append(el("div", {
+          textContent: gpuGroupLabel(group),
+          style: "padding:8px 8px 2px;color:#ffffff;font-size:12px;font-weight:600;line-height:1.35;",
+        }));
+      }
       for (const sku of group) {
-        optgroup.append(el("option", { value: sku.instanceType, textContent: skuLine(sku) }));
+        const line = skuLine(sku);
+        optgroup.append(el("option", { value: sku.instanceType, textContent: line }));
+        if (!menu) continue;
+        const row = el("div", {
+          role: "option", textContent: line, tabIndex: -1,
+          style: "padding:3px 8px 3px 16px;color:#d5d5d5;font-size:13px;line-height:1.35;cursor:pointer;white-space:nowrap;",
+          onclick: () => chooseSku(sku.instanceType),
+          onmouseenter: (e) => { if (e.currentTarget.getAttribute("aria-selected") !== "true") e.currentTarget.style.background = "#3a3a3a"; },
+          onmouseleave: (e) => { if (e.currentTarget.getAttribute("aria-selected") !== "true") e.currentTarget.style.background = ""; },
+        });
+        row.dataset.instanceType = sku.instanceType;
+        row.setAttribute("aria-selected", "false");
+        menu.append(row);
       }
       select.append(optgroup);
     }
     if (saved) select.value = saved;
+    syncSkuButton();
+    markSelectedSku(select.value);
     updateRate();
     setRenderEnabled(!!select.value);
   } catch (e) { setStatus(`Could not list GPUs: ${e}`, "#ff8888"); setRenderEnabled(false); }
